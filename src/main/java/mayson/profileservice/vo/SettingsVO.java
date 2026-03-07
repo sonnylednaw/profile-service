@@ -12,6 +12,7 @@ import java.math.BigDecimal;
 public class SettingsVO {
     private BigDecimal goalPerWeek;
     private BigDecimal goalPerMonth;
+    private String goalCurrency;
     private BigDecimal totalSalary;
     private BigDecimal fixedCosts;
     private String timezone;

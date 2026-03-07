@@ -36,6 +36,9 @@ public class UserSettings {
     @Column(name = "goal_per_month", precision = 12, scale = 2)
     private BigDecimal goalPerMonth;
 
+    @Column(name = "goal_currency", length = 3)
+    private String goalCurrency;
+
     @Column(name = "total_salary", precision = 12, scale = 2)
     private BigDecimal totalSalary;
 

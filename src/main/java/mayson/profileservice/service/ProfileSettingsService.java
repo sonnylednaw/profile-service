@@ -32,6 +32,7 @@ public class ProfileSettingsService {
                         .userId(userId)
                         .goalPerWeek(BigDecimal.ZERO)
                         .goalPerMonth(BigDecimal.ZERO)
+                        .goalCurrency("MXN")
                         .totalSalary(BigDecimal.ZERO)
                         .fixedCosts(BigDecimal.ZERO)
                         .timezone("America/Cancun")
@@ -66,6 +67,7 @@ public class ProfileSettingsService {
         return SettingsVO.builder()
                 .goalPerWeek(settings.getGoalPerWeek())
                 .goalPerMonth(settings.getGoalPerMonth())
+                .goalCurrency(normalizeCurrency(settings.getGoalCurrency()))
                 .totalSalary(settings.getTotalSalary())
                 .fixedCosts(settings.getFixedCosts())
                 .timezone(settings.getTimezone())
@@ -77,6 +79,7 @@ public class ProfileSettingsService {
         UserSettings settings = loadOrCreate(userId);
         settings.setGoalPerWeek(safe(settingsVO.getGoalPerWeek()));
         settings.setGoalPerMonth(safe(settingsVO.getGoalPerMonth()));
+        settings.setGoalCurrency(normalizeCurrency(settingsVO.getGoalCurrency()));
         settings.setTotalSalary(safe(settingsVO.getTotalSalary()));
         settings.setFixedCosts(safe(settingsVO.getFixedCosts()));
         settings.setTimezone(settingsVO.getTimezone() == null || settingsVO.getTimezone().isBlank() ? "America/Cancun" : settingsVO.getTimezone());
@@ -85,6 +88,7 @@ public class ProfileSettingsService {
         return SettingsVO.builder()
                 .goalPerWeek(saved.getGoalPerWeek())
                 .goalPerMonth(saved.getGoalPerMonth())
+                .goalCurrency(normalizeCurrency(saved.getGoalCurrency()))
                 .totalSalary(saved.getTotalSalary())
                 .fixedCosts(saved.getFixedCosts())
                 .timezone(saved.getTimezone())

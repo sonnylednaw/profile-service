@@ -34,6 +34,7 @@ public class ProfileSettingsService {
                         .goalPerMonth(BigDecimal.ZERO)
                         .goalCurrency("MXN")
                         .totalSalary(BigDecimal.ZERO)
+                        .salaryCurrency("MXN")
                         .fixedCosts(BigDecimal.ZERO)
                         .timezone("America/Cancun")
                         .preferredCurrency("MXN")
@@ -69,6 +70,7 @@ public class ProfileSettingsService {
                 .goalPerMonth(settings.getGoalPerMonth())
                 .goalCurrency(normalizeCurrency(settings.getGoalCurrency()))
                 .totalSalary(settings.getTotalSalary())
+                .salaryCurrency(normalizeCurrency(settings.getSalaryCurrency()))
                 .fixedCosts(settings.getFixedCosts())
                 .timezone(settings.getTimezone())
                 .preferredCurrency(settings.getPreferredCurrency())
@@ -81,6 +83,7 @@ public class ProfileSettingsService {
         settings.setGoalPerMonth(safe(settingsVO.getGoalPerMonth()));
         settings.setGoalCurrency(normalizeCurrency(settingsVO.getGoalCurrency()));
         settings.setTotalSalary(safe(settingsVO.getTotalSalary()));
+        settings.setSalaryCurrency(normalizeCurrency(settingsVO.getSalaryCurrency()));
         settings.setFixedCosts(safe(settingsVO.getFixedCosts()));
         settings.setTimezone(settingsVO.getTimezone() == null || settingsVO.getTimezone().isBlank() ? "America/Cancun" : settingsVO.getTimezone());
         settings.setPreferredCurrency(settingsVO.getPreferredCurrency() == null || settingsVO.getPreferredCurrency().isBlank() ? "MXN" : settingsVO.getPreferredCurrency().toUpperCase());
@@ -90,6 +93,7 @@ public class ProfileSettingsService {
                 .goalPerMonth(saved.getGoalPerMonth())
                 .goalCurrency(normalizeCurrency(saved.getGoalCurrency()))
                 .totalSalary(saved.getTotalSalary())
+                .salaryCurrency(normalizeCurrency(saved.getSalaryCurrency()))
                 .fixedCosts(saved.getFixedCosts())
                 .timezone(saved.getTimezone())
                 .preferredCurrency(saved.getPreferredCurrency())

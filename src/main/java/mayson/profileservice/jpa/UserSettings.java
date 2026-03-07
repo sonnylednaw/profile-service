@@ -42,6 +42,9 @@ public class UserSettings {
     @Column(name = "total_salary", precision = 12, scale = 2)
     private BigDecimal totalSalary;
 
+    @Column(name = "salary_currency", length = 3)
+    private String salaryCurrency;
+
     @Column(name = "fixed_costs", precision = 12, scale = 2)
     private BigDecimal fixedCosts;
 

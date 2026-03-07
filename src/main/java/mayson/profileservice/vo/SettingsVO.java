@@ -14,6 +14,7 @@ public class SettingsVO {
     private BigDecimal goalPerMonth;
     private String goalCurrency;
     private BigDecimal totalSalary;
+    private String salaryCurrency;
     private BigDecimal fixedCosts;
     private String timezone;
     private String preferredCurrency;

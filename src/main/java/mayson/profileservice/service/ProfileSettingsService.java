@@ -104,6 +104,7 @@ public class ProfileSettingsService {
                         .label(cost.getLabel())
                         .category(cost.getCategory())
                         .paymentPeriod(cost.getPaymentPeriod())
+                        .currency(normalizeCurrency(cost.getCurrency()))
                         .amount(cost.getAmount())
                         .build())
                 .toList();
@@ -118,6 +119,7 @@ public class ProfileSettingsService {
                         .label(cost.getLabel().trim())
                         .category(cost.getCategory() == null || cost.getCategory().isBlank() ? "subscription" : cost.getCategory().trim())
                         .paymentPeriod(normalizePaymentPeriod(cost.getPaymentPeriod()))
+                        .currency(normalizeCurrency(cost.getCurrency()))
                         .amount(safe(cost.getAmount()))
                         .build())
                 .toList();
@@ -128,6 +130,7 @@ public class ProfileSettingsService {
                         .label(cost.getLabel())
                         .category(cost.getCategory())
                         .paymentPeriod(cost.getPaymentPeriod())
+                        .currency(normalizeCurrency(cost.getCurrency()))
                         .amount(cost.getAmount())
                         .build())
                 .toList();
@@ -142,5 +145,16 @@ public class ProfileSettingsService {
             return normalized;
         }
         return "MONTHLY";
+    }
+
+    private String normalizeCurrency(String currency) {
+        if (currency == null || currency.isBlank()) {
+            return "MXN";
+        }
+        String normalized = currency.trim().toUpperCase();
+        if (normalized.length() == 3) {
+            return normalized;
+        }
+        return "MXN";
     }
 }

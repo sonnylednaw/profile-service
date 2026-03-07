@@ -30,6 +30,9 @@ public class RecurringCost {
     @Column(name = "payment_period", nullable = false, length = 20)
     private String paymentPeriod;
 
+    @Column(name = "currency", length = 3)
+    private String currency;
+
     @Column(name = "amount", nullable = false, precision = 12, scale = 2)
     private BigDecimal amount;
 }

@@ -14,5 +14,6 @@ public class RecurringCostVO {
     private String label;
     private String category;
     private String paymentPeriod;
+    private String currency;
     private BigDecimal amount;
 }

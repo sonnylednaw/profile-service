@@ -1,0 +1,65 @@
+name: Build and Push Docker Image with Version Tag
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine next version tag
+        id: version
+        run: |
+          latest_tag=$(git tag --list "v0.0.*" | sort -V | tail -n1)
+          if [[ -z "$latest_tag" ]]; then
+            new_tag="v0.0.1"
+          else
+            patch=$(echo "$latest_tag" | cut -d. -f3)
+            new_patch=$((patch + 1))
+            new_tag="v0.0.${new_patch}"
+          fi
+          echo "NEW_TAG=$new_tag" >> $GITHUB_OUTPUT
+
+      - name: Create Git Tag
+        run: |
+          git tag ${{ steps.version.outputs.NEW_TAG }}
+          git push origin ${{ steps.version.outputs.NEW_TAG }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Build with Maven
+        run: mvn clean package -DskipTests -Dspring.profiles.active=prod
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ steps.version.outputs.NEW_TAG }}

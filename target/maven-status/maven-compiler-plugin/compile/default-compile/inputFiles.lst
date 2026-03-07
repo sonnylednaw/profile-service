@@ -1,0 +1,11 @@
+/Users/sonnywandel/Documents/source/mayson/profile-service/src/main/java/mayson/profileservice/ProfileServiceApplication.java
+/Users/sonnywandel/Documents/source/mayson/profile-service/src/main/java/mayson/profileservice/config/SecurityConfig.java
+/Users/sonnywandel/Documents/source/mayson/profile-service/src/main/java/mayson/profileservice/controller/ProfileController.java
+/Users/sonnywandel/Documents/source/mayson/profile-service/src/main/java/mayson/profileservice/jpa/RecurringCost.java
+/Users/sonnywandel/Documents/source/mayson/profile-service/src/main/java/mayson/profileservice/jpa/UserSettings.java
+/Users/sonnywandel/Documents/source/mayson/profile-service/src/main/java/mayson/profileservice/repository/RecurringCostRepository.java
+/Users/sonnywandel/Documents/source/mayson/profile-service/src/main/java/mayson/profileservice/repository/UserSettingsRepository.java
+/Users/sonnywandel/Documents/source/mayson/profile-service/src/main/java/mayson/profileservice/service/ProfileSettingsService.java
+/Users/sonnywandel/Documents/source/mayson/profile-service/src/main/java/mayson/profileservice/vo/ProfileVO.java
+/Users/sonnywandel/Documents/source/mayson/profile-service/src/main/java/mayson/profileservice/vo/RecurringCostVO.java
+/Users/sonnywandel/Documents/source/mayson/profile-service/src/main/java/mayson/profileservice/vo/SettingsVO.java

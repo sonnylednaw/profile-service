@@ -1,0 +1,16 @@
+spring:
+  config:
+    import: optional:file:/Users/sonnywandel/IdeaProjects/mayson/credentials.yml
+  datasource:
+    url: jdbc:postgresql://localhost:5432/mayson_finance?currentSchema=dev
+  jpa:
+    properties:
+      hibernate:
+        default_schema: dev
+    hibernate:
+      ddl-auto: update
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/

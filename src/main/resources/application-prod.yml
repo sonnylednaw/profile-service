@@ -1,0 +1,19 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres.database.svc.cluster.local:5432/mayson_finance?currentSchema=prod
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+  jpa:
+    properties:
+      hibernate:
+        default_schema: prod
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: update
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://${EUREKA_SERVICE_NAME:eureka-service}.${EUREKA_NAMESPACE:default}.svc.cluster.local:8761/eureka/
+  instance:
+    preferIpAddress: true

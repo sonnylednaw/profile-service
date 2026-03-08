@@ -8,6 +8,7 @@ import mayson.profileservice.vo.ProfileVO;
 import mayson.profileservice.vo.RecurringCostVO;
 import mayson.profileservice.vo.SettingsVO;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -122,6 +123,7 @@ public class ProfileSettingsService {
                 .toList();
     }
 
+    @Transactional
     public List<RecurringCostVO> replaceRecurringCosts(String userId, List<RecurringCostVO> costs) {
         recurringCostRepository.deleteAllByUserId(userId);
         List<RecurringCost> entities = costs.stream()

@@ -45,6 +45,9 @@ public class UserSettings {
     @Column(name = "salary_currency", length = 3)
     private String salaryCurrency;
 
+    @Column(name = "carry_over_to_next_week")
+    private Boolean carryOverToNextWeek;
+
     @Column(name = "fixed_costs", precision = 12, scale = 2)
     private BigDecimal fixedCosts;
 

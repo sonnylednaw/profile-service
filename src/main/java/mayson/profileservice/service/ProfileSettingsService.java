@@ -35,6 +35,7 @@ public class ProfileSettingsService {
                         .goalCurrency("MXN")
                         .totalSalary(BigDecimal.ZERO)
                         .salaryCurrency("MXN")
+                        .carryOverToNextWeek(false)
                         .fixedCosts(BigDecimal.ZERO)
                         .timezone("America/Cancun")
                         .preferredCurrency("MXN")
@@ -71,6 +72,7 @@ public class ProfileSettingsService {
                 .goalCurrency(normalizeCurrency(settings.getGoalCurrency()))
                 .totalSalary(settings.getTotalSalary())
                 .salaryCurrency(normalizeCurrency(settings.getSalaryCurrency()))
+                .carryOverToNextWeek(Boolean.TRUE.equals(settings.getCarryOverToNextWeek()))
                 .fixedCosts(settings.getFixedCosts())
                 .timezone(settings.getTimezone())
                 .preferredCurrency(settings.getPreferredCurrency())
@@ -84,6 +86,7 @@ public class ProfileSettingsService {
         settings.setGoalCurrency(normalizeCurrency(settingsVO.getGoalCurrency()));
         settings.setTotalSalary(safe(settingsVO.getTotalSalary()));
         settings.setSalaryCurrency(normalizeCurrency(settingsVO.getSalaryCurrency()));
+        settings.setCarryOverToNextWeek(Boolean.TRUE.equals(settingsVO.getCarryOverToNextWeek()));
         settings.setFixedCosts(safe(settingsVO.getFixedCosts()));
         settings.setTimezone(settingsVO.getTimezone() == null || settingsVO.getTimezone().isBlank() ? "America/Cancun" : settingsVO.getTimezone());
         settings.setPreferredCurrency(settingsVO.getPreferredCurrency() == null || settingsVO.getPreferredCurrency().isBlank() ? "MXN" : settingsVO.getPreferredCurrency().toUpperCase());
@@ -94,6 +97,7 @@ public class ProfileSettingsService {
                 .goalCurrency(normalizeCurrency(saved.getGoalCurrency()))
                 .totalSalary(saved.getTotalSalary())
                 .salaryCurrency(normalizeCurrency(saved.getSalaryCurrency()))
+                .carryOverToNextWeek(Boolean.TRUE.equals(saved.getCarryOverToNextWeek()))
                 .fixedCosts(saved.getFixedCosts())
                 .timezone(saved.getTimezone())
                 .preferredCurrency(saved.getPreferredCurrency())

@@ -37,6 +37,7 @@ public class ProfileSettingsService {
                         .totalSalary(BigDecimal.ZERO)
                         .salaryCurrency("MXN")
                         .carryOverToNextWeek(false)
+                        .shoppingBetaEnabled(false)
                         .fixedCosts(BigDecimal.ZERO)
                         .timezone("America/Cancun")
                         .preferredCurrency("MXN")
@@ -74,6 +75,7 @@ public class ProfileSettingsService {
                 .totalSalary(settings.getTotalSalary())
                 .salaryCurrency(normalizeCurrency(settings.getSalaryCurrency()))
                 .carryOverToNextWeek(Boolean.TRUE.equals(settings.getCarryOverToNextWeek()))
+                .shoppingBetaEnabled(Boolean.TRUE.equals(settings.getShoppingBetaEnabled()))
                 .fixedCosts(settings.getFixedCosts())
                 .timezone(settings.getTimezone())
                 .preferredCurrency(settings.getPreferredCurrency())
@@ -88,6 +90,7 @@ public class ProfileSettingsService {
         settings.setTotalSalary(safe(settingsVO.getTotalSalary()));
         settings.setSalaryCurrency(normalizeCurrency(settingsVO.getSalaryCurrency()));
         settings.setCarryOverToNextWeek(Boolean.TRUE.equals(settingsVO.getCarryOverToNextWeek()));
+        settings.setShoppingBetaEnabled(Boolean.TRUE.equals(settingsVO.getShoppingBetaEnabled()));
         settings.setFixedCosts(safe(settingsVO.getFixedCosts()));
         settings.setTimezone(settingsVO.getTimezone() == null || settingsVO.getTimezone().isBlank() ? "America/Cancun" : settingsVO.getTimezone());
         settings.setPreferredCurrency(settingsVO.getPreferredCurrency() == null || settingsVO.getPreferredCurrency().isBlank() ? "MXN" : settingsVO.getPreferredCurrency().toUpperCase());
@@ -99,6 +102,7 @@ public class ProfileSettingsService {
                 .totalSalary(saved.getTotalSalary())
                 .salaryCurrency(normalizeCurrency(saved.getSalaryCurrency()))
                 .carryOverToNextWeek(Boolean.TRUE.equals(saved.getCarryOverToNextWeek()))
+                .shoppingBetaEnabled(Boolean.TRUE.equals(saved.getShoppingBetaEnabled()))
                 .fixedCosts(saved.getFixedCosts())
                 .timezone(saved.getTimezone())
                 .preferredCurrency(saved.getPreferredCurrency())

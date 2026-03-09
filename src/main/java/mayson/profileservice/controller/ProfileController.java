@@ -8,6 +8,7 @@ import mayson.profileservice.service.ShoppingReceiptService;
 import mayson.profileservice.vo.ProfileVO;
 import mayson.profileservice.vo.RecurringCostVO;
 import mayson.profileservice.vo.SettingsVO;
+import mayson.profileservice.vo.ShoppingAnalyticsVO;
 import mayson.profileservice.vo.ShoppingReceiptVO;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
@@ -16,6 +17,7 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping
@@ -111,5 +113,24 @@ public class ProfileController {
             @PathVariable Long receiptId
     ) {
         return shoppingReceiptService.markSavedAsExpense(authentication.getName(), receiptId);
+    }
+
+    @PutMapping("/shopping/receipts/{receiptId}/classification")
+    @PreAuthorize("hasAuthority('SCOPE_finances.write')")
+    @Operation(summary = "Update supermarket marker/classification for a receipt")
+    public ShoppingReceiptVO updateReceiptClassification(
+            Authentication authentication,
+            @PathVariable Long receiptId,
+            @RequestBody Map<String, Boolean> payload
+    ) {
+        boolean supermarketPurchase = Boolean.TRUE.equals(payload.get("supermarketPurchase"));
+        return shoppingReceiptService.updateSupermarketClassification(authentication.getName(), receiptId, supermarketPurchase);
+    }
+
+    @GetMapping("/shopping/analytics")
+    @PreAuthorize("hasAuthority('SCOPE_finances.read')")
+    @Operation(summary = "Get shopping analytics and weekly estimations")
+    public ShoppingAnalyticsVO getShoppingAnalytics(Authentication authentication) {
+        return shoppingReceiptService.getAnalytics(authentication.getName());
     }
 }

@@ -20,6 +20,8 @@ public class ShoppingReceiptVO {
     private String originalFileName;
     private String errorMessage;
     private Boolean savedAsExpense;
+    private Boolean supermarketPurchase;
+    private String inferredCategory;
     private LocalDateTime createdAt;
     private LocalDateTime processedAt;
     private List<ShoppingReceiptItemVO> items;

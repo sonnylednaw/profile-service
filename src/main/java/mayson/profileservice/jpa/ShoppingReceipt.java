@@ -46,6 +46,12 @@ public class ShoppingReceipt {
     @Column(name = "saved_as_expense", nullable = false)
     private Boolean savedAsExpense;
 
+    @Column(name = "is_supermarket_purchase")
+    private Boolean isSupermarketPurchase;
+
+    @Column(name = "inferred_category", length = 40)
+    private String inferredCategory;
+
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 

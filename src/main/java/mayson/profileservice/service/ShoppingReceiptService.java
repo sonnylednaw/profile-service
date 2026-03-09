@@ -4,8 +4,11 @@ import mayson.profileservice.jpa.ShoppingReceipt;
 import mayson.profileservice.jpa.ShoppingReceiptItem;
 import mayson.profileservice.repository.ShoppingReceiptItemRepository;
 import mayson.profileservice.repository.ShoppingReceiptRepository;
+import mayson.profileservice.vo.ShoppingAnalyticsVO;
+import mayson.profileservice.vo.ShoppingCategoryStatVO;
 import mayson.profileservice.vo.ShoppingReceiptItemVO;
 import mayson.profileservice.vo.ShoppingReceiptVO;
+import mayson.profileservice.vo.ShoppingTopProductVO;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.ImageType;
@@ -24,11 +27,17 @@ import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.DayOfWeek;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -73,6 +82,8 @@ public class ShoppingReceiptService {
                 .totalAmount(BigDecimal.ZERO)
                 .originalFileName(trim(name, 255))
                 .savedAsExpense(false)
+                .isSupermarketPurchase(false)
+                .inferredCategory("unusual_weekly")
                 .createdAt(LocalDateTime.now())
                 .build());
 
@@ -109,6 +120,118 @@ public class ShoppingReceiptService {
         return toVOWithItems(receiptRepository.save(receipt));
     }
 
+    @Transactional
+    public ShoppingReceiptVO updateSupermarketClassification(String userId, Long receiptId, boolean supermarketPurchase) {
+        ShoppingReceipt receipt = receiptRepository.findByIdAndUserId(receiptId, userId)
+                .orElseThrow(() -> new RuntimeException("Receipt not found"));
+        receipt.setIsSupermarketPurchase(supermarketPurchase);
+        if (supermarketPurchase) {
+            receipt.setInferredCategory("usual_weekly");
+        } else {
+            List<ParsedItem> parsed = itemRepository.findAllByReceiptOrderByPositionIndexAsc(receipt).stream()
+                    .map(item -> new ParsedItem(item.getItemName(), item.getItemPrice()))
+                    .toList();
+            receipt.setInferredCategory(inferCategory(receipt.getRawText(), parsed, receipt.getStoreName()));
+        }
+        return toVOWithItems(receiptRepository.save(receipt));
+    }
+
+    public ShoppingAnalyticsVO getAnalytics(String userId) {
+        List<ShoppingReceipt> completed = receiptRepository.findAllByUserIdOrderByCreatedAtDesc(userId).stream()
+                .filter(receipt -> STATUS_COMPLETED.equals(receipt.getStatus()))
+                .toList();
+
+        if (completed.isEmpty()) {
+            return ShoppingAnalyticsVO.builder()
+                    .averageProductsPerWeek(BigDecimal.ZERO)
+                    .averageSpendPerWeek(BigDecimal.ZERO)
+                    .currentWeekProducts(BigDecimal.ZERO)
+                    .currentWeekSpend(BigDecimal.ZERO)
+                    .currentWeekReceipts(0L)
+                    .topProducts(List.of())
+                    .categoryBreakdown(List.of())
+                    .build();
+        }
+
+        LocalDate now = LocalDate.now();
+        LocalDate oldest = completed.stream()
+                .map(receipt -> receipt.getCreatedAt().toLocalDate())
+                .min(Comparator.naturalOrder())
+                .orElse(now);
+        long weeksObserved = Math.max(1, java.time.temporal.ChronoUnit.WEEKS.between(startOfWeek(oldest), startOfWeek(now)) + 1);
+
+        LocalDate weekStart = startOfWeek(now);
+        BigDecimal currentWeekProducts = BigDecimal.ZERO;
+        BigDecimal currentWeekSpend = BigDecimal.ZERO;
+        long currentWeekReceipts = 0;
+
+        BigDecimal totalProducts = BigDecimal.ZERO;
+        BigDecimal totalSpend = BigDecimal.ZERO;
+        Map<String, Long> categoryCounts = new HashMap<>();
+        Map<String, ProductAggregate> productMap = new HashMap<>();
+
+        for (ShoppingReceipt receipt : completed) {
+            List<ShoppingReceiptItem> items = itemRepository.findAllByReceiptOrderByPositionIndexAsc(receipt);
+            BigDecimal itemCount = BigDecimal.valueOf(items.size());
+            BigDecimal spend = safe(receipt.getTotalAmount());
+            totalProducts = totalProducts.add(itemCount);
+            totalSpend = totalSpend.add(spend);
+            categoryCounts.merge(normalizeCategory(receipt.getInferredCategory()), 1L, Long::sum);
+
+            boolean includeForTop = Boolean.TRUE.equals(receipt.getIsSupermarketPurchase())
+                    || "usual_weekly".equalsIgnoreCase(receipt.getInferredCategory());
+            if (includeForTop) {
+                for (ShoppingReceiptItem item : items) {
+                    String normalized = normalizeProductName(item.getItemName());
+                    if (normalized.length() < 2) {
+                        continue;
+                    }
+                    ProductAggregate aggregate = productMap.computeIfAbsent(normalized, key -> new ProductAggregate());
+                    aggregate.purchaseCount += 1;
+                    aggregate.totalPrice = aggregate.totalPrice.add(safe(item.getItemPrice()));
+                }
+            }
+
+            if (!receipt.getCreatedAt().toLocalDate().isBefore(weekStart)) {
+                currentWeekProducts = currentWeekProducts.add(itemCount);
+                currentWeekSpend = currentWeekSpend.add(spend);
+                currentWeekReceipts += 1;
+            }
+        }
+
+        List<ShoppingTopProductVO> topProducts = productMap.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue().purchaseCount, a.getValue().purchaseCount))
+                .limit(8)
+                .map(entry -> {
+                    ProductAggregate aggregate = entry.getValue();
+                    return ShoppingTopProductVO.builder()
+                            .name(entry.getKey())
+                            .purchaseCount(aggregate.purchaseCount)
+                            .avgUnitsPerWeek(divide(BigDecimal.valueOf(aggregate.purchaseCount), weeksObserved))
+                            .avgSpendPerWeek(divide(aggregate.totalPrice, weeksObserved))
+                            .build();
+                })
+                .toList();
+
+        List<ShoppingCategoryStatVO> categories = categoryCounts.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                .map(entry -> ShoppingCategoryStatVO.builder()
+                        .category(entry.getKey())
+                        .receipts(entry.getValue())
+                        .build())
+                .collect(Collectors.toList());
+
+        return ShoppingAnalyticsVO.builder()
+                .averageProductsPerWeek(divide(totalProducts, weeksObserved))
+                .averageSpendPerWeek(divide(totalSpend, weeksObserved))
+                .currentWeekProducts(currentWeekProducts.setScale(2, RoundingMode.HALF_UP))
+                .currentWeekSpend(currentWeekSpend.setScale(2, RoundingMode.HALF_UP))
+                .currentWeekReceipts(currentWeekReceipts)
+                .topProducts(topProducts)
+                .categoryBreakdown(categories)
+                .build();
+    }
+
     public void processReceiptAsync(Long receiptId, String userId, String originalFileName, byte[] content) {
         ShoppingReceipt receipt = receiptRepository.findByIdAndUserId(receiptId, userId)
                 .orElseThrow(() -> new RuntimeException("Receipt not found"));
@@ -119,11 +242,15 @@ public class ShoppingReceiptService {
             BigDecimal total = parseTotal(text, parsedItems);
             String currency = detectCurrency(text);
             String storeName = detectStore(text);
+            String inferredCategory = inferCategory(text, parsedItems, storeName);
+            boolean supermarketPurchase = "usual_weekly".equalsIgnoreCase(inferredCategory);
 
             receipt.setStatus(STATUS_COMPLETED);
             receipt.setStoreName(trim(storeName, 180));
             receipt.setCurrency(currency);
             receipt.setTotalAmount(total);
+            receipt.setInferredCategory(inferredCategory);
+            receipt.setIsSupermarketPurchase(supermarketPurchase);
             receipt.setRawText(trim(text, 40000));
             receipt.setErrorMessage(null);
             receipt.setProcessedAt(LocalDateTime.now());
@@ -369,6 +496,74 @@ public class ShoppingReceiptService {
         return cleaned;
     }
 
+    private String inferCategory(String text, List<ParsedItem> items, String storeName) {
+        String corpus = ((text == null ? "" : text) + " " + (storeName == null ? "" : storeName)).toLowerCase(Locale.ROOT);
+        long groceryHits = items.stream()
+                .map(ParsedItem::name)
+                .map(name -> name.toLowerCase(Locale.ROOT))
+                .filter(name -> name.matches(".*(milk|bread|eggs|rice|pasta|cheese|fruit|vegetable|banana|apple|tomato|water|yogurt|coffee|meat|chicken|fish|soda|toilet paper|detergent|soap|shampoo).*"))
+                .count();
+
+        boolean supermarketStore = corpus.matches(".*\\b(walmart|costco|heb|soriana|aldi|lidl|target|carrefour|mercadona|supermarket|grocery)\\b.*");
+        if (supermarketStore || groceryHits >= 2) {
+            return "usual_weekly";
+        }
+
+        boolean travelHit = corpus.matches(".*\\b(hotel|airline|flight|uber|taxi|gas|fuel|airport|bus|train|hostel|booking)\\b.*");
+        if (travelHit) {
+            return "travel";
+        }
+
+        return "unusual_weekly";
+    }
+
+    private LocalDate startOfWeek(LocalDate date) {
+        int delta = date.getDayOfWeek().getValue() - DayOfWeek.MONDAY.getValue();
+        return date.minusDays(delta);
+    }
+
+    private BigDecimal safe(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
+    }
+
+    private BigDecimal divide(BigDecimal value, long divisor) {
+        if (divisor <= 0) {
+            return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+        }
+        return value.divide(BigDecimal.valueOf(divisor), 2, RoundingMode.HALF_UP);
+    }
+
+    private String normalizeProductName(String name) {
+        if (name == null) {
+            return "";
+        }
+        String cleaned = name.toLowerCase(Locale.ROOT)
+                .replaceAll("\\b\\d+[xX]?\\b", " ")
+                .replaceAll("\\b(kg|g|gr|ml|lt|l|pcs|pc|unidad|ud)\\b", " ")
+                .replaceAll("\\s{2,}", " ")
+                .trim();
+        if (cleaned.length() > 36) {
+            return cleaned.substring(0, 36).trim();
+        }
+        return cleaned;
+    }
+
+    private String normalizeCategory(String category) {
+        if (category == null || category.isBlank()) {
+            return "unusual_weekly";
+        }
+        String normalized = category.trim().toLowerCase(Locale.ROOT);
+        if ("travel".equals(normalized) || "usual_weekly".equals(normalized) || "unusual_weekly".equals(normalized)) {
+            return normalized;
+        }
+        return "unusual_weekly";
+    }
+
+    private static class ProductAggregate {
+        private long purchaseCount = 0;
+        private BigDecimal totalPrice = BigDecimal.ZERO;
+    }
+
     private ShoppingReceiptVO toVOWithItems(ShoppingReceipt receipt) {
         List<ShoppingReceiptItemVO> items = itemRepository.findAllByReceiptOrderByPositionIndexAsc(receipt)
                 .stream()
@@ -392,6 +587,8 @@ public class ShoppingReceiptService {
                 .originalFileName(receipt.getOriginalFileName())
                 .errorMessage(receipt.getErrorMessage())
                 .savedAsExpense(Boolean.TRUE.equals(receipt.getSavedAsExpense()))
+                .supermarketPurchase(Boolean.TRUE.equals(receipt.getIsSupermarketPurchase()))
+                .inferredCategory(normalizeCategory(receipt.getInferredCategory()))
                 .createdAt(receipt.getCreatedAt())
                 .processedAt(receipt.getProcessedAt())
                 .items(items)

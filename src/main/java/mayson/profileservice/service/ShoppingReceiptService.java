@@ -30,6 +30,7 @@ import java.nio.file.Path;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -187,8 +188,7 @@ public class ShoppingReceiptService {
                         continue;
                     }
                     ProductAggregate aggregate = productMap.computeIfAbsent(normalized, key -> new ProductAggregate());
-                    aggregate.purchaseCount += 1;
-                    aggregate.totalPrice = aggregate.totalPrice.add(safe(item.getItemPrice()));
+                    aggregate.addSample(safe(item.getItemPrice()), receipt.getCreatedAt().toLocalDate());
                 }
             }
 
@@ -204,11 +204,27 @@ public class ShoppingReceiptService {
                 .limit(8)
                 .map(entry -> {
                     ProductAggregate aggregate = entry.getValue();
+                    BigDecimal avgPrice = aggregate.purchaseCount <= 0
+                            ? BigDecimal.ZERO
+                            : aggregate.totalPrice.divide(BigDecimal.valueOf(aggregate.purchaseCount), 2, RoundingMode.HALF_UP);
+                    BigDecimal trendPct = aggregate.averageHistoricalPrice.compareTo(BigDecimal.ZERO) > 0
+                            ? aggregate.lastPrice.subtract(aggregate.averageHistoricalPrice)
+                                .divide(aggregate.averageHistoricalPrice, 4, RoundingMode.HALF_UP)
+                                .multiply(BigDecimal.valueOf(100))
+                            : BigDecimal.ZERO;
+                    int estNextDays = aggregate.averageIntervalDays == null
+                            ? 7
+                            : Math.max(1, Math.min(30, aggregate.averageIntervalDays));
                     return ShoppingTopProductVO.builder()
                             .name(entry.getKey())
                             .purchaseCount(aggregate.purchaseCount)
                             .avgUnitsPerWeek(divide(BigDecimal.valueOf(aggregate.purchaseCount), weeksObserved))
                             .avgSpendPerWeek(divide(aggregate.totalPrice, weeksObserved))
+                            .avgPrice(avgPrice)
+                            .lastPrice(aggregate.lastPrice)
+                            .priceTrendPct(trendPct.setScale(2, RoundingMode.HALF_UP))
+                            .estimatedNextPurchaseDays(estNextDays)
+                            .lastPurchasedAt(aggregate.lastPurchaseDate)
                             .build();
                 })
                 .toList();
@@ -562,6 +578,50 @@ public class ShoppingReceiptService {
     private static class ProductAggregate {
         private long purchaseCount = 0;
         private BigDecimal totalPrice = BigDecimal.ZERO;
+        private BigDecimal averageHistoricalPrice = BigDecimal.ZERO;
+        private BigDecimal lastPrice = BigDecimal.ZERO;
+        private LocalDate lastPurchaseDate = null;
+        private Integer averageIntervalDays = null;
+        private final List<LocalDate> purchaseDates = new ArrayList<>();
+        private final List<BigDecimal> samplePrices = new ArrayList<>();
+
+        private void addSample(BigDecimal price, LocalDate date) {
+            purchaseCount += 1;
+            totalPrice = totalPrice.add(price);
+            samplePrices.add(price);
+            purchaseDates.add(date);
+            if (lastPurchaseDate == null || date.isAfter(lastPurchaseDate)) {
+                lastPurchaseDate = date;
+                lastPrice = price;
+            }
+            recalculateDerived();
+        }
+
+        private void recalculateDerived() {
+            if (samplePrices.isEmpty()) {
+                averageHistoricalPrice = BigDecimal.ZERO;
+                return;
+            }
+            averageHistoricalPrice = samplePrices.stream()
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .divide(BigDecimal.valueOf(samplePrices.size()), 2, RoundingMode.HALF_UP);
+
+            if (purchaseDates.size() < 2) {
+                averageIntervalDays = null;
+                return;
+            }
+            List<LocalDate> sorted = purchaseDates.stream().sorted().toList();
+            long totalDays = 0;
+            int count = 0;
+            for (int i = 1; i < sorted.size(); i++) {
+                long diff = ChronoUnit.DAYS.between(sorted.get(i - 1), sorted.get(i));
+                if (diff > 0) {
+                    totalDays += diff;
+                    count += 1;
+                }
+            }
+            averageIntervalDays = count == 0 ? null : (int) Math.round((double) totalDays / count);
+        }
     }
 
     private ShoppingReceiptVO toVOWithItems(ShoppingReceipt receipt) {

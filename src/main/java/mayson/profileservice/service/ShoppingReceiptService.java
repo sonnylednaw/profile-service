@@ -40,6 +40,8 @@ public class ShoppingReceiptService {
     private static final String STATUS_PROCESSING = "PROCESSING";
     private static final String STATUS_COMPLETED = "COMPLETED";
     private static final String STATUS_FAILED = "FAILED";
+    private static final Pattern MONEY_TOKEN_PATTERN = Pattern.compile("(?<!\\d)(?:MXN|USD|EUR|\\$|€)?\\s*([0-9]{1,4}(?:[\\.,][0-9]{3})*(?:[\\.,][0-9]{2})|[0-9]+[\\.,][0-9]{2})(?!\\d)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern SUMMARY_PATTERN = Pattern.compile(".*\\b(total|subtotal|tax|iva|cambio|change|cash|visa|mastercard|payment|pago|tendered|balance|rounding|discount|descuento|propina|tip)\\b.*", Pattern.CASE_INSENSITIVE);
 
     private final ShoppingReceiptRepository receiptRepository;
     private final ShoppingReceiptItemRepository itemRepository;
@@ -248,29 +250,44 @@ public class ShoppingReceiptService {
     }
 
     private List<ParsedItem> parseItems(String text) {
-        Pattern pattern = Pattern.compile("^([\\p{L}0-9 .,'_\\-/]{3,}?)\\s+([0-9]+(?:[\\.,][0-9]{2}))$");
         List<ParsedItem> items = new ArrayList<>();
+        String lastKey = "";
 
         for (String line : text.split("\\R")) {
-            String trimmed = line.trim();
+            String trimmed = line.replace('\t', ' ').replaceAll("\\s{2,}", " ").trim();
             if (trimmed.isEmpty()) {
                 continue;
             }
-
-            Matcher matcher = pattern.matcher(trimmed);
-            if (!matcher.matches()) {
+            if (trimmed.length() < 5 || SUMMARY_PATTERN.matcher(trimmed).matches()) {
                 continue;
             }
 
-            String name = matcher.group(1).trim();
-            BigDecimal price = toMoney(matcher.group(2));
+            Matcher moneyMatcher = MONEY_TOKEN_PATTERN.matcher(trimmed);
+            int lastStart = -1;
+            String lastToken = null;
+            while (moneyMatcher.find()) {
+                lastStart = moneyMatcher.start(1);
+                lastToken = moneyMatcher.group(1);
+            }
+            if (lastToken == null || lastStart <= 0) {
+                continue;
+            }
+
+            String name = trimmed.substring(0, lastStart).replaceAll("\\s{2,}", " ").trim();
+            name = cleanupItemName(name);
+            BigDecimal price = toMoney(lastToken);
             if (price.compareTo(BigDecimal.ZERO) <= 0) {
                 continue;
             }
-            if (name.toLowerCase(Locale.ROOT).matches(".*(total|subtotal|tax|iva|change|cash|visa|mastercard).*")) {
+            if (name.length() < 2 || name.matches("[0-9\\-_/., ]+")) {
                 continue;
             }
 
+            String currentKey = name.toLowerCase(Locale.ROOT) + "|" + price;
+            if (currentKey.equals(lastKey)) {
+                continue;
+            }
+            lastKey = currentKey;
             items.add(new ParsedItem(name, price));
         }
 
@@ -278,14 +295,22 @@ public class ShoppingReceiptService {
     }
 
     private BigDecimal parseTotal(String text, List<ParsedItem> items) {
-        Pattern totalPattern = Pattern.compile("(?:total|importe|sum)\\D*([0-9]+(?:[\\.,][0-9]{2}))", Pattern.CASE_INSENSITIVE);
+        Pattern totalLinePattern = Pattern.compile(".*\\b(total|importe|sum|amount due|a pagar|grand total)\\b.*", Pattern.CASE_INSENSITIVE);
         for (String line : text.split("\\R")) {
-            Matcher matcher = totalPattern.matcher(line.trim());
-            if (matcher.find()) {
-                BigDecimal value = toMoney(matcher.group(1));
-                if (value.compareTo(BigDecimal.ZERO) > 0) {
-                    return value;
+            String trimmed = line.trim();
+            if (!totalLinePattern.matcher(trimmed).matches()) {
+                continue;
+            }
+            Matcher moneyMatcher = MONEY_TOKEN_PATTERN.matcher(trimmed);
+            BigDecimal candidate = BigDecimal.ZERO;
+            while (moneyMatcher.find()) {
+                BigDecimal parsed = toMoney(moneyMatcher.group(1));
+                if (parsed.compareTo(candidate) > 0) {
+                    candidate = parsed;
                 }
+            }
+            if (candidate.compareTo(BigDecimal.ZERO) > 0) {
+                return candidate;
             }
         }
 
@@ -298,10 +323,50 @@ public class ShoppingReceiptService {
 
     private BigDecimal toMoney(String raw) {
         try {
-            return new BigDecimal(raw.replace(',', '.')).setScale(2, RoundingMode.HALF_UP);
+            String sanitized = raw.replaceAll("[^0-9,\\.]", "");
+            if (sanitized.isBlank()) {
+                return BigDecimal.ZERO;
+            }
+
+            int lastComma = sanitized.lastIndexOf(',');
+            int lastDot = sanitized.lastIndexOf('.');
+            if (lastComma >= 0 && lastDot >= 0) {
+                if (lastComma > lastDot) {
+                    sanitized = sanitized.replace(".", "").replace(',', '.');
+                } else {
+                    sanitized = sanitized.replace(",", "");
+                }
+            } else if (lastComma >= 0) {
+                sanitized = hasTwoDecimals(sanitized, ',') ? sanitized.replace(',', '.') : sanitized.replace(",", "");
+            } else if (lastDot >= 0) {
+                sanitized = hasTwoDecimals(sanitized, '.') ? sanitized : sanitized.replace(".", "");
+            }
+
+            return new BigDecimal(sanitized).setScale(2, RoundingMode.HALF_UP);
         } catch (Exception ignored) {
             return BigDecimal.ZERO;
         }
+    }
+
+    private boolean hasTwoDecimals(String value, char separator) {
+        int idx = value.lastIndexOf(separator);
+        if (idx < 0 || idx + 3 != value.length()) {
+            return false;
+        }
+        return Character.isDigit(value.charAt(value.length() - 1)) && Character.isDigit(value.charAt(value.length() - 2));
+    }
+
+    private String cleanupItemName(String rawName) {
+        String cleaned = rawName
+                .replaceAll("^[0-9]{4,}\\s+", "")
+                .replaceAll("^\\d+\\s*[xX]\\s*", "")
+                .replaceAll("[^\\p{L}0-9 .,'_\\-/]", " ")
+                .replaceAll("\\s{2,}", " ")
+                .trim();
+        if (cleaned.length() > 120) {
+            return cleaned.substring(0, 120).trim();
+        }
+        return cleaned;
     }
 
     private ShoppingReceiptVO toVOWithItems(ShoppingReceipt receipt) {

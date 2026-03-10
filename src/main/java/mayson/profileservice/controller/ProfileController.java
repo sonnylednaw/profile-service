@@ -5,6 +5,9 @@ import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import mayson.profileservice.service.ProfileSettingsService;
 import mayson.profileservice.service.ShoppingReceiptService;
+import mayson.profileservice.service.AssistantService;
+import mayson.profileservice.vo.AssistantAskRequestVO;
+import mayson.profileservice.vo.AssistantAskResponseVO;
 import mayson.profileservice.vo.ProfileVO;
 import mayson.profileservice.vo.RecurringCostVO;
 import mayson.profileservice.vo.SettingsVO;
@@ -27,10 +30,16 @@ public class ProfileController {
 
     private final ProfileSettingsService service;
     private final ShoppingReceiptService shoppingReceiptService;
+    private final AssistantService assistantService;
 
-    public ProfileController(ProfileSettingsService service, ShoppingReceiptService shoppingReceiptService) {
+    public ProfileController(
+            ProfileSettingsService service,
+            ShoppingReceiptService shoppingReceiptService,
+            AssistantService assistantService
+    ) {
         this.service = service;
         this.shoppingReceiptService = shoppingReceiptService;
+        this.assistantService = assistantService;
     }
 
     @GetMapping("/me")
@@ -132,5 +141,18 @@ public class ProfileController {
     @Operation(summary = "Get shopping analytics and weekly estimations")
     public ShoppingAnalyticsVO getShoppingAnalytics(Authentication authentication) {
         return shoppingReceiptService.getAnalytics(authentication.getName());
+    }
+
+    @PostMapping("/assistant/ask")
+    @PreAuthorize("hasAuthority('SCOPE_finances.read')")
+    @Operation(summary = "Ask the finance AI assistant with grounded user data context")
+    public AssistantAskResponseVO askAssistant(
+            Authentication authentication,
+            @RequestBody AssistantAskRequestVO request
+    ) {
+        if (request == null || request.getQuestion() == null || request.getQuestion().isBlank()) {
+            throw new IllegalArgumentException("Question is required.");
+        }
+        return assistantService.ask(request);
     }
 }

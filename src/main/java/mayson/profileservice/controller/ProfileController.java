@@ -153,6 +153,6 @@ public class ProfileController {
         if (request == null || request.getQuestion() == null || request.getQuestion().isBlank()) {
             throw new IllegalArgumentException("Question is required.");
         }
-        return assistantService.ask(request);
+        return assistantService.ask(authentication.getName(), request);
     }
 }

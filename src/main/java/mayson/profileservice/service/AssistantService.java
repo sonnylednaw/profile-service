@@ -8,6 +8,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -21,8 +23,10 @@ import java.util.Map;
 @Service
 public class AssistantService {
 
+    private static final Logger log = LoggerFactory.getLogger(AssistantService.class);
     private static final String DEFAULT_PROVIDER = "local-fallback";
     private static final String DEFAULT_MODEL = "gpt-4o-mini";
+    private static final int MAX_CONTEXT_CHARS = 7000;
 
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
@@ -53,10 +57,13 @@ public class AssistantService {
         if (question.isBlank()) {
             throw new IllegalArgumentException("Question cannot be empty.");
         }
+        String context = capContext(safe(request.getContext()));
+        String currency = safe(request.getCurrency());
+        String timezone = safe(request.getTimezone());
 
         if (canUseModel()) {
             try {
-                String answer = askModel(question, safe(request.getContext()), safe(request.getCurrency()), safe(request.getTimezone()));
+                String answer = askModel(question, context, currency, timezone);
                 if (!answer.isBlank()) {
                     return AssistantAskResponseVO.builder()
                             .answer(answer)
@@ -64,13 +71,25 @@ public class AssistantService {
                             .provider("openai-compatible")
                             .build();
                 }
-            } catch (Exception ignored) {
-                // Deterministic fallback below keeps chat usable if model provider fails.
+            } catch (Exception firstError) {
+                log.warn("Assistant model call failed, retrying once. reason={}", firstError.getMessage());
+                try {
+                    String retryAnswer = askModel(question, context, currency, timezone);
+                    if (!retryAnswer.isBlank()) {
+                        return AssistantAskResponseVO.builder()
+                                .answer(retryAnswer)
+                                .modelUsed(true)
+                                .provider("openai-compatible")
+                                .build();
+                    }
+                } catch (Exception retryError) {
+                    log.warn("Assistant model retry failed. reason={}", retryError.getMessage());
+                }
             }
         }
 
         return AssistantAskResponseVO.builder()
-                .answer(fallbackAnswer(question, safe(request.getContext()), safe(request.getCurrency())))
+                .answer(fallbackAnswer(question, context, currency))
                 .modelUsed(false)
                 .provider(DEFAULT_PROVIDER)
                 .build();
@@ -85,6 +104,7 @@ public class AssistantService {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("model", model);
         payload.put("temperature", 0.2);
+        payload.put("max_tokens", 220);
         payload.put("messages", List.of(
                 Map.of(
                         "role", "system",
@@ -154,5 +174,11 @@ public class AssistantService {
 
     private String safe(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private String capContext(String context) {
+        if (context == null) return "";
+        if (context.length() <= MAX_CONTEXT_CHARS) return context;
+        return context.substring(0, MAX_CONTEXT_CHARS);
     }
 }

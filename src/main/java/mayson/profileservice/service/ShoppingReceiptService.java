@@ -19,6 +19,8 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.awt.image.BufferedImage;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -329,26 +331,81 @@ public class ShoppingReceiptService {
     }
 
     private String extractTextFromImage(byte[] imageBytes) throws Exception {
-        Path tempImage = Files.createTempFile("mayson-receipt-", ".img");
-        Files.write(tempImage, imageBytes);
+        Path tempImage = Files.createTempFile("mayson-receipt-", ".png");
+        try {
+            BufferedImage source = ImageIO.read(new java.io.ByteArrayInputStream(imageBytes));
+            if (source != null) {
+                BufferedImage prepared = preprocessForOcr(source);
+                ImageIO.write(prepared, "png", tempImage.toFile());
+            } else {
+                Files.write(tempImage, imageBytes);
+            }
 
-        Process process = new ProcessBuilder("tesseract", tempImage.toString(), "stdout", "-l", "eng+spa")
-                .redirectErrorStream(true)
-                .start();
+            String firstPass = runTesseract(tempImage, "6");
+            if (stripToAlnum(firstPass).length() >= 20) {
+                return firstPass;
+            }
+            String secondPass = runTesseract(tempImage, "11");
+            return secondPass.length() > firstPass.length() ? secondPass : firstPass;
+        } finally {
+            Files.deleteIfExists(tempImage);
+        }
+    }
+
+    private String runTesseract(Path imagePath, String psm) throws Exception {
+        Process process = new ProcessBuilder(
+                "tesseract",
+                imagePath.toString(),
+                "stdout",
+                "-l", "eng+spa",
+                "--oem", "1",
+                "--psm", psm,
+                "-c", "preserve_interword_spaces=1",
+                "-c", "user_defined_dpi=300"
+        ).redirectErrorStream(true).start();
 
         String output;
         try (InputStream inputStream = process.getInputStream()) {
             output = new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
         }
-
         int exitCode = process.waitFor();
-        Files.deleteIfExists(tempImage);
-
         if (exitCode != 0) {
             throw new RuntimeException("OCR failed. Please upload a clearer image/PDF.");
         }
-
         return output == null ? "" : output;
+    }
+
+    private BufferedImage preprocessForOcr(BufferedImage source) {
+        int targetWidth = source.getWidth();
+        int targetHeight = source.getHeight();
+        if (source.getWidth() < 1600) {
+            double scale = 1600.0 / source.getWidth();
+            targetWidth = 1600;
+            targetHeight = Math.max(1, (int) Math.round(source.getHeight() * scale));
+        }
+
+        BufferedImage gray = new BufferedImage(targetWidth, targetHeight, BufferedImage.TYPE_BYTE_GRAY);
+        Graphics2D graphics = gray.createGraphics();
+        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+        graphics.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        graphics.drawImage(source, 0, 0, targetWidth, targetHeight, null);
+        graphics.dispose();
+
+        // Lightweight contrast normalization for receipt text
+        for (int y = 0; y < gray.getHeight(); y++) {
+            for (int x = 0; x < gray.getWidth(); x++) {
+                int rgb = gray.getRGB(x, y) & 0xFF;
+                int boosted = rgb < 140 ? Math.max(0, rgb - 35) : Math.min(255, rgb + 25);
+                int bin = boosted < 155 ? 0 : 255;
+                int out = (bin << 16) | (bin << 8) | bin;
+                gray.setRGB(x, y, out);
+            }
+        }
+        return gray;
+    }
+
+    private String stripToAlnum(String value) {
+        return value == null ? "" : value.replaceAll("[^A-Za-z0-9]", "");
     }
 
     private boolean isSupportedFile(String fileName, String contentType) {

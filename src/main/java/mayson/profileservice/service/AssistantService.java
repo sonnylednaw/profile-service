@@ -77,7 +77,7 @@ public class AssistantService {
     }
 
     private boolean canUseModel() {
-        return !baseUrl.isBlank() && !apiKey.isBlank();
+        return !baseUrl.isBlank();
     }
 
     private String askModel(String question, String context, String currency, String timezone) throws Exception {
@@ -94,13 +94,15 @@ public class AssistantService {
                 Map.of("role", "user", "content", prompt)
         ));
 
-        HttpRequest httpRequest = HttpRequest.newBuilder()
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(trimTrailingSlash(baseUrl) + "/chat/completions"))
                 .timeout(Duration.ofSeconds(timeoutSeconds))
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey)
-                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(payload)))
-                .build();
+                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(payload)));
+        if (!apiKey.isBlank()) {
+            builder.header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey);
+        }
+        HttpRequest httpRequest = builder.build();
 
         HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
@@ -141,7 +143,7 @@ public class AssistantService {
             return "I need your latest dashboard context to answer reliably. Refresh dashboard data and ask again.";
         }
         return "AI model is currently unavailable, but your question is captured. " +
-                "Enable `assistant.base-url` and `assistant.api-key` in profile-service to get full generative answers.";
+                "Enable `assistant.base-url` (and optionally `assistant.api-key`) in profile-service to get full generative answers.";
     }
 
     private String trimTrailingSlash(String value) {

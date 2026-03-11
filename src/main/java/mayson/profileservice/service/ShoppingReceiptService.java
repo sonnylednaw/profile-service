@@ -54,6 +54,9 @@ public class ShoppingReceiptService {
     private static final String STATUS_FAILED = "FAILED";
     private static final Pattern MONEY_TOKEN_PATTERN = Pattern.compile("(?<!\\d)(?:MXN|USD|EUR|\\$|€)?\\s*([0-9]{1,4}(?:[\\.,][0-9]{3})*(?:[\\.,][0-9]{2})|[0-9]+[\\.,][0-9]{2})(?!\\d)", Pattern.CASE_INSENSITIVE);
     private static final Pattern SUMMARY_PATTERN = Pattern.compile(".*\\b(total|subtotal|tax|iva|cambio|change|cash|visa|mastercard|payment|pago|tendered|balance|rounding|discount|descuento|propina|tip)\\b.*", Pattern.CASE_INSENSITIVE);
+    private static final Pattern QTY_PREFIX_PATTERN = Pattern.compile("^\\s*\\d+[xX]\\s+.*");
+    private static final Pattern BULK_PREFIX_PATTERN = Pattern.compile("^\\s*(?:kg|g|gr|ml|l|lt|pcs|pc)\\b.*", Pattern.CASE_INSENSITIVE);
+    private static final Pattern RECEIPT_CODE_LINE_PATTERN = Pattern.compile("^\\s*[A-Z0-9\\-_/]{8,}\\s*$");
 
     private final ShoppingReceiptRepository receiptRepository;
     private final ShoppingReceiptItemRepository itemRepository;
@@ -132,7 +135,7 @@ public class ShoppingReceiptService {
             receipt.setInferredCategory("usual_weekly");
         } else {
             List<ParsedItem> parsed = itemRepository.findAllByReceiptOrderByPositionIndexAsc(receipt).stream()
-                    .map(item -> new ParsedItem(item.getItemName(), item.getItemPrice()))
+                    .map(item -> new ParsedItem(item.getItemName(), item.getItemPrice(), safe(item.getItemConfidence())))
                     .toList();
             receipt.setInferredCategory(inferCategory(receipt.getRawText(), parsed, receipt.getStoreName()));
         }
@@ -257,7 +260,12 @@ public class ShoppingReceiptService {
         try {
             String text = extractText(content, originalFileName);
             List<ParsedItem> parsedItems = parseItems(text);
-            BigDecimal total = parseTotal(text, parsedItems);
+            BigDecimal parsedTotal = parseTotal(text, parsedItems);
+            BigDecimal itemSum = parsedItems.stream()
+                    .map(ParsedItem::price)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .setScale(2, RoundingMode.HALF_UP);
+            BigDecimal total = chooseMostPlausibleTotal(parsedTotal, itemSum, parsedItems.size());
             String currency = detectCurrency(text);
             String storeName = detectStore(text);
             String inferredCategory = inferCategory(text, parsedItems, storeName);
@@ -284,6 +292,7 @@ public class ShoppingReceiptService {
                         .positionIndex(i)
                         .itemName(trim(parsed.name(), 220))
                         .itemPrice(parsed.price())
+                        .itemConfidence(parsed.confidence())
                         .build());
             }
             itemRepository.saveAll(entities);
@@ -306,21 +315,27 @@ public class ShoppingReceiptService {
 
     private String extractTextFromPdf(byte[] content) throws Exception {
         try (PDDocument document = Loader.loadPDF(content)) {
-            PDFTextStripper stripper = new PDFTextStripper();
-            String directText = stripper.getText(document);
-            if (directText != null && directText.replaceAll("\\s+", "").length() > 20) {
-                return directText;
-            }
-
             PDFRenderer renderer = new PDFRenderer(document);
             StringBuilder builder = new StringBuilder();
             for (int page = 0; page < document.getNumberOfPages(); page++) {
-                BufferedImage image = renderer.renderImageWithDPI(page, 220f, ImageType.RGB);
+                String pageText = extractPageText(document, page);
+                if (stripToAlnum(pageText).length() >= 20) {
+                    builder.append(pageText).append("\n");
+                    continue;
+                }
+                BufferedImage image = renderer.renderImageWithDPI(page, 240f, ImageType.RGB);
                 byte[] pngBytes = toPng(image);
                 builder.append(extractTextFromImage(pngBytes)).append("\n");
             }
             return builder.toString();
         }
+    }
+
+    private String extractPageText(PDDocument document, int pageIndex) throws IOException {
+        PDFTextStripper stripper = new PDFTextStripper();
+        stripper.setStartPage(pageIndex + 1);
+        stripper.setEndPage(pageIndex + 1);
+        return stripper.getText(document);
     }
 
     private byte[] toPng(BufferedImage image) throws IOException {
@@ -451,14 +466,17 @@ public class ShoppingReceiptService {
 
     private List<ParsedItem> parseItems(String text) {
         List<ParsedItem> items = new ArrayList<>();
-        String lastKey = "";
+        Map<String, ParsedItem> unique = new java.util.LinkedHashMap<>();
 
         for (String line : text.split("\\R")) {
             String trimmed = line.replace('\t', ' ').replaceAll("\\s{2,}", " ").trim();
             if (trimmed.isEmpty()) {
                 continue;
             }
-            if (trimmed.length() < 5 || SUMMARY_PATTERN.matcher(trimmed).matches()) {
+            if (trimmed.length() < 4 || SUMMARY_PATTERN.matcher(trimmed).matches()) {
+                continue;
+            }
+            if (RECEIPT_CODE_LINE_PATTERN.matcher(trimmed).matches()) {
                 continue;
             }
 
@@ -483,15 +501,33 @@ public class ShoppingReceiptService {
                 continue;
             }
 
-            String currentKey = name.toLowerCase(Locale.ROOT) + "|" + price;
-            if (currentKey.equals(lastKey)) {
+            BigDecimal confidence = scoreItemConfidence(trimmed, name, price);
+            if (confidence.compareTo(BigDecimal.valueOf(0.45)) < 0) {
                 continue;
             }
-            lastKey = currentKey;
-            items.add(new ParsedItem(name, price));
+
+            String currentKey = name.toLowerCase(Locale.ROOT) + "|" + price.toPlainString();
+            ParsedItem existing = unique.get(currentKey);
+            if (existing == null || confidence.compareTo(existing.confidence()) > 0) {
+                unique.put(currentKey, new ParsedItem(name, price, confidence));
+            }
         }
 
+        items.addAll(unique.values());
         return items;
+    }
+
+    private BigDecimal scoreItemConfidence(String originalLine, String itemName, BigDecimal price) {
+        double score = 0.45;
+        String normalized = originalLine == null ? "" : originalLine.toLowerCase(Locale.ROOT);
+        if (itemName.chars().filter(Character::isLetter).count() >= 3) score += 0.2;
+        if (itemName.length() >= 4) score += 0.08;
+        if (price.scale() >= 2) score += 0.1;
+        if (QTY_PREFIX_PATTERN.matcher(originalLine).matches()) score += 0.1;
+        if (BULK_PREFIX_PATTERN.matcher(originalLine).matches()) score += 0.05;
+        if (normalized.matches(".*\\b(kg|g|gr|ml|lt|l|pcs|pc|pack)\\b.*")) score += 0.05;
+        if (normalized.matches(".*\\b(total|subtotal|iva|tax|change|cash|visa|mastercard|payment|pago|discount|descuento)\\b.*")) score -= 0.35;
+        return BigDecimal.valueOf(Math.max(0.0, Math.min(0.99, score))).setScale(4, RoundingMode.HALF_UP);
     }
 
     private BigDecimal parseTotal(String text, List<ParsedItem> items) {
@@ -519,6 +555,25 @@ public class ShoppingReceiptService {
             sum = sum.add(item.price());
         }
         return sum.setScale(2, RoundingMode.HALF_UP);
+    }
+
+    private BigDecimal chooseMostPlausibleTotal(BigDecimal parsedTotal, BigDecimal itemSum, int itemCount) {
+        BigDecimal total = safe(parsedTotal).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal sum = safe(itemSum).setScale(2, RoundingMode.HALF_UP);
+        if (total.compareTo(BigDecimal.ZERO) <= 0) return sum;
+        if (sum.compareTo(BigDecimal.ZERO) <= 0) return total;
+
+        BigDecimal diff = total.subtract(sum).abs();
+        BigDecimal tolerance = BigDecimal.valueOf(Math.max(2.0, total.doubleValue() * 0.06)).setScale(2, RoundingMode.HALF_UP);
+        if (diff.compareTo(tolerance) <= 0) {
+            return total;
+        }
+
+        // If line items are many and stable, prefer their sum over a likely OCR-misread total.
+        if (itemCount >= 3) {
+            return sum;
+        }
+        return total.compareTo(sum) >= 0 ? total : sum;
     }
 
     private BigDecimal toMoney(String raw) {
@@ -689,6 +744,7 @@ public class ShoppingReceiptService {
                         .positionIndex(item.getPositionIndex())
                         .name(item.getItemName())
                         .price(item.getItemPrice())
+                        .confidence(item.getItemConfidence())
                         .build())
                 .toList();
         return toVO(receipt, items);
@@ -719,6 +775,6 @@ public class ShoppingReceiptService {
         return value.length() <= maxLength ? value : value.substring(0, maxLength);
     }
 
-    private record ParsedItem(String name, BigDecimal price) {
+    private record ParsedItem(String name, BigDecimal price, BigDecimal confidence) {
     }
 }

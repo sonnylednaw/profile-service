@@ -14,4 +14,5 @@ public class ShoppingReceiptItemVO {
     private Integer positionIndex;
     private String name;
     private BigDecimal price;
+    private BigDecimal confidence;
 }

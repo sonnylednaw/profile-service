@@ -30,4 +30,7 @@ public class ShoppingReceiptItem {
 
     @Column(name = "item_price", nullable = false, precision = 12, scale = 2)
     private BigDecimal itemPrice;
+
+    @Column(name = "item_confidence", precision = 5, scale = 4)
+    private BigDecimal itemConfidence;
 }

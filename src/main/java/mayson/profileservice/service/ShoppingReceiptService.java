@@ -119,6 +119,14 @@ public class ShoppingReceiptService {
     }
 
     @Transactional
+    public void deleteReceipt(String userId, Long receiptId) {
+        ShoppingReceipt receipt = receiptRepository.findByIdAndUserId(receiptId, userId)
+                .orElseThrow(() -> new RuntimeException("Receipt not found"));
+        itemRepository.deleteAllByReceipt(receipt);
+        receiptRepository.delete(receipt);
+    }
+
+    @Transactional
     public ShoppingReceiptVO markSavedAsExpense(String userId, Long receiptId) {
         ShoppingReceipt receipt = receiptRepository.findByIdAndUserId(receiptId, userId)
                 .orElseThrow(() -> new RuntimeException("Receipt not found"));

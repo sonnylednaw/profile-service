@@ -114,6 +114,16 @@ public class ProfileController {
         return shoppingReceiptService.getReceipt(authentication.getName(), receiptId);
     }
 
+    @DeleteMapping("/shopping/receipts/{receiptId}")
+    @PreAuthorize("hasAuthority('SCOPE_finances.write')")
+    @Operation(summary = "Delete shopping receipt and extracted items")
+    public void deleteShoppingReceipt(
+            Authentication authentication,
+            @PathVariable Long receiptId
+    ) {
+        shoppingReceiptService.deleteReceipt(authentication.getName(), receiptId);
+    }
+
     @PostMapping("/shopping/receipts/{receiptId}/mark-expense-saved")
     @PreAuthorize("hasAuthority('SCOPE_finances.write')")
     @Operation(summary = "Mark shopping receipt as saved to expenses")

@@ -138,8 +138,8 @@ public class AssistantService {
         String prompt = buildPrompt(question, context, currency, timezone, memory);
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("model", model);
-        payload.put("temperature", 0.2);
-        payload.put("max_tokens", 260);
+        payload.put("temperature", 0.15);
+        payload.put("max_tokens", 180);
         payload.put("messages", List.of(
                 Map.of(
                         "role", "system",

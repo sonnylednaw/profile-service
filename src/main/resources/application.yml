@@ -25,3 +25,4 @@ assistant:
   model: ${AI_MODEL:gpt-4o-mini}
   timeout-seconds: ${AI_TIMEOUT_SECONDS:25}
   cache-ttl-seconds: ${AI_CACHE_TTL_SECONDS:120}
+  max-context-chars: ${AI_MAX_CONTEXT_CHARS:120000}

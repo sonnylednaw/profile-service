@@ -28,7 +28,7 @@ public class AssistantService {
     private static final Logger log = LoggerFactory.getLogger(AssistantService.class);
     private static final String DEFAULT_PROVIDER = "local-fallback";
     private static final String DEFAULT_MODEL = "gpt-4o-mini";
-    private static final int MAX_CONTEXT_CHARS = 7000;
+    private static final int DEFAULT_MAX_CONTEXT_CHARS = 120000;
 
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
@@ -37,6 +37,7 @@ public class AssistantService {
     private final String apiKey;
     private final String model;
     private final int timeoutSeconds;
+    private final int maxContextChars;
     private final long cacheTtlMillis;
     private final Map<String, CacheEntry> responseCache = new ConcurrentHashMap<>();
 
@@ -47,7 +48,8 @@ public class AssistantService {
             @Value("${assistant.api-key:}") String apiKey,
             @Value("${assistant.model:" + DEFAULT_MODEL + "}") String model,
             @Value("${assistant.timeout-seconds:25}") int timeoutSeconds,
-            @Value("${assistant.cache-ttl-seconds:120}") int cacheTtlSeconds
+            @Value("${assistant.cache-ttl-seconds:120}") int cacheTtlSeconds,
+            @Value("${assistant.max-context-chars:" + DEFAULT_MAX_CONTEXT_CHARS + "}") int maxContextChars
     ) {
         this.objectMapper = objectMapper;
         this.assistantMemoryRepository = assistantMemoryRepository;
@@ -55,6 +57,7 @@ public class AssistantService {
         this.apiKey = apiKey == null ? "" : apiKey.trim();
         this.model = model == null || model.isBlank() ? DEFAULT_MODEL : model.trim();
         this.timeoutSeconds = timeoutSeconds <= 0 ? 25 : timeoutSeconds;
+        this.maxContextChars = maxContextChars <= 2000 ? DEFAULT_MAX_CONTEXT_CHARS : maxContextChars;
         this.cacheTtlMillis = Math.max(30, cacheTtlSeconds) * 1000L;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(Math.min(this.timeoutSeconds, 10)))
@@ -293,8 +296,8 @@ public class AssistantService {
 
     private String capContext(String context) {
         if (context == null) return "";
-        if (context.length() <= MAX_CONTEXT_CHARS) return context;
-        return context.substring(0, MAX_CONTEXT_CHARS);
+        if (context.length() <= maxContextChars) return context;
+        return context.substring(0, maxContextChars);
     }
 
     private String truncate(String value, int maxLen) {

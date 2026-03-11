@@ -26,3 +26,9 @@ assistant:
   timeout-seconds: ${AI_TIMEOUT_SECONDS:25}
   cache-ttl-seconds: ${AI_CACHE_TTL_SECONDS:120}
   max-context-chars: ${AI_MAX_CONTEXT_CHARS:120000}
+
+receipt-ai:
+  base-url: ${RECEIPT_AI_BASE_URL:${AI_BASE_URL:}}
+  api-key: ${RECEIPT_AI_API_KEY:${AI_API_KEY:}}
+  model: ${RECEIPT_AI_MODEL:llava:7b}
+  timeout-seconds: ${RECEIPT_AI_TIMEOUT_SECONDS:${AI_TIMEOUT_SECONDS:45}}

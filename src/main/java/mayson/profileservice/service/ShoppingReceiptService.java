@@ -1,5 +1,7 @@
 package mayson.profileservice.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import mayson.profileservice.jpa.ShoppingReceipt;
 import mayson.profileservice.jpa.ShoppingReceiptItem;
 import mayson.profileservice.repository.ShoppingReceiptItemRepository;
@@ -14,6 +16,11 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.ImageType;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -26,16 +33,23 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.DayOfWeek;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -49,9 +63,11 @@ import javax.imageio.ImageIO;
 @Service
 public class ShoppingReceiptService {
 
+    private static final Logger log = LoggerFactory.getLogger(ShoppingReceiptService.class);
     private static final String STATUS_PROCESSING = "PROCESSING";
     private static final String STATUS_COMPLETED = "COMPLETED";
     private static final String STATUS_FAILED = "FAILED";
+    private static final String DEFAULT_RECEIPT_AI_MODEL = "llava:7b";
     private static final Pattern MONEY_TOKEN_PATTERN = Pattern.compile("(?<!\\d)(?:MXN|USD|EUR|\\$|€)?\\s*([0-9]{1,4}(?:[\\.,][0-9]{3})*(?:[\\.,][0-9]{2})|[0-9]+[\\.,][0-9]{2})(?!\\d)", Pattern.CASE_INSENSITIVE);
     private static final Pattern SUMMARY_PATTERN = Pattern.compile(".*\\b(total|subtotal|tax|iva|cambio|change|cash|visa|mastercard|payment|pago|tendered|balance|rounding|discount|descuento|propina|tip)\\b.*", Pattern.CASE_INSENSITIVE);
     private static final Pattern QTY_PREFIX_PATTERN = Pattern.compile("^\\s*\\d+[xX]\\s+.*");
@@ -60,13 +76,34 @@ public class ShoppingReceiptService {
 
     private final ShoppingReceiptRepository receiptRepository;
     private final ShoppingReceiptItemRepository itemRepository;
+    private final ObjectMapper objectMapper;
+    private final HttpClient httpClient;
+    private final String receiptAiBaseUrl;
+    private final String receiptAiApiKey;
+    private final String receiptAiModel;
+    private final int receiptAiTimeoutSeconds;
 
     public ShoppingReceiptService(
             ShoppingReceiptRepository receiptRepository,
-            ShoppingReceiptItemRepository itemRepository
+            ShoppingReceiptItemRepository itemRepository,
+            ObjectMapper objectMapper,
+            @Value("${receipt-ai.base-url:${assistant.base-url:}}") String receiptAiBaseUrl,
+            @Value("${receipt-ai.api-key:${assistant.api-key:}}") String receiptAiApiKey,
+            @Value("${receipt-ai.model:}") String receiptAiModel,
+            @Value("${receipt-ai.timeout-seconds:${assistant.timeout-seconds:45}}") int receiptAiTimeoutSeconds
     ) {
         this.receiptRepository = receiptRepository;
         this.itemRepository = itemRepository;
+        this.objectMapper = objectMapper;
+        this.receiptAiBaseUrl = receiptAiBaseUrl == null ? "" : receiptAiBaseUrl.trim();
+        this.receiptAiApiKey = receiptAiApiKey == null ? "" : receiptAiApiKey.trim();
+        this.receiptAiModel = receiptAiModel == null || receiptAiModel.isBlank()
+                ? DEFAULT_RECEIPT_AI_MODEL
+                : receiptAiModel.trim();
+        this.receiptAiTimeoutSeconds = Math.max(20, receiptAiTimeoutSeconds);
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(Math.min(this.receiptAiTimeoutSeconds, 10)))
+                .build();
     }
 
     @Transactional
@@ -266,20 +303,38 @@ public class ShoppingReceiptService {
                 .orElseThrow(() -> new RuntimeException("Receipt not found"));
 
         try {
-            String text = extractText(content, originalFileName);
-            List<ParsedItem> parsedItems = parseItems(text);
-            BigDecimal parsedTotal = parseTotal(text, parsedItems);
+            String text = "";
+            RuntimeException extractionError = null;
+            try {
+                text = extractText(content, originalFileName);
+            } catch (RuntimeException ex) {
+                extractionError = ex;
+                log.warn("OCR text extraction failed for receiptId={}: {}", receiptId, ex.getMessage());
+            } catch (Exception ex) {
+                extractionError = new RuntimeException(ex.getMessage(), ex);
+                log.warn("OCR text extraction failed for receiptId={}: {}", receiptId, ex.getMessage());
+            }
+
+            VisionExtraction vision = extractWithVision(content, originalFileName);
+            List<ParsedItem> parsedItems = vision.items().isEmpty() ? parseItems(text) : vision.items();
+            BigDecimal parsedTotal = vision.total().compareTo(BigDecimal.ZERO) > 0
+                    ? vision.total()
+                    : parseTotal(text, parsedItems);
             BigDecimal itemSum = parsedItems.stream()
                     .map(ParsedItem::price)
                     .reduce(BigDecimal.ZERO, BigDecimal::add)
                     .setScale(2, RoundingMode.HALF_UP);
             BigDecimal total = chooseMostPlausibleTotal(parsedTotal, itemSum, parsedItems.size());
             if (total.compareTo(BigDecimal.ZERO) <= 0 && parsedItems.isEmpty()) {
+                if (extractionError != null && !vision.hasSignal()) {
+                    throw extractionError;
+                }
                 throw new RuntimeException("Could not extract a valid receipt. Please upload a clearer image/PDF.");
             }
-            String currency = detectCurrency(text);
-            String storeName = detectStore(text);
-            String inferredCategory = inferCategory(text, parsedItems, storeName);
+            String currency = vision.currency().isBlank() ? detectCurrency(text) : vision.currency();
+            String storeName = vision.storeName().isBlank() ? detectStore(text) : vision.storeName();
+            String rawCorpus = mergeRawCorpus(text, vision.rawText());
+            String inferredCategory = inferCategory(rawCorpus, parsedItems, storeName);
             boolean supermarketPurchase = "usual_weekly".equalsIgnoreCase(inferredCategory);
 
             receipt.setStatus(STATUS_COMPLETED);
@@ -288,7 +343,7 @@ public class ShoppingReceiptService {
             receipt.setTotalAmount(total);
             receipt.setInferredCategory(inferredCategory);
             receipt.setIsSupermarketPurchase(supermarketPurchase);
-            receipt.setRawText(trim(text, 40000));
+            receipt.setRawText(trim(rawCorpus, 40000));
             receipt.setErrorMessage(null);
             receipt.setProcessedAt(LocalDateTime.now());
             receipt.setSavedAsExpense(Boolean.TRUE.equals(receipt.getSavedAsExpense()));
@@ -314,6 +369,93 @@ public class ShoppingReceiptService {
             receipt.setProcessedAt(LocalDateTime.now());
             receiptRepository.save(receipt);
             itemRepository.deleteAllByReceipt(receipt);
+        }
+    }
+
+    private VisionExtraction extractWithVision(byte[] content, String originalFileName) {
+        if (!canUseReceiptAi()) {
+            return VisionExtraction.empty();
+        }
+        try {
+            List<VisionImage> images = buildVisionImages(content, originalFileName);
+            if (images.isEmpty()) {
+                return VisionExtraction.empty();
+            }
+
+            List<Map<String, Object>> contentParts = new ArrayList<>();
+            contentParts.add(Map.of(
+                    "type", "text",
+                    "text", """
+                            Extract this shopping receipt and return STRICT JSON only.
+                            Schema:
+                            {
+                              "storeName": "string",
+                              "currency": "MXN|USD|EUR|OTHER",
+                              "total": "number string with 2 decimals",
+                              "items": [{"name":"string","price":"number string with 2 decimals"}]
+                            }
+                            Rules:
+                            - Include every recognized line item with a positive price.
+                            - Keep names clean and short.
+                            - If uncertain, still return best-effort values.
+                            - Never include markdown or explanation, return JSON object only.
+                            """
+            ));
+            for (VisionImage image : images) {
+                contentParts.add(Map.of(
+                        "type", "image_url",
+                        "image_url", Map.of("url", "data:" + image.mimeType() + ";base64," + image.base64())
+                ));
+            }
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("model", receiptAiModel);
+            payload.put("temperature", 0.0);
+            payload.put("max_tokens", 1200);
+            payload.put("messages", List.of(
+                    Map.of(
+                            "role", "system",
+                            "content", "You extract receipts into structured JSON with high recall and precision."
+                    ),
+                    Map.of("role", "user", "content", contentParts)
+            ));
+
+            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                    .uri(URI.create(trimTrailingSlash(receiptAiBaseUrl) + "/chat/completions"))
+                    .timeout(Duration.ofSeconds(receiptAiTimeoutSeconds))
+                    .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(payload)));
+            if (!receiptAiApiKey.isBlank()) {
+                requestBuilder.header(HttpHeaders.AUTHORIZATION, "Bearer " + receiptAiApiKey);
+            }
+
+            HttpResponse<String> response = httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new IllegalStateException("Receipt AI provider HTTP " + response.statusCode());
+            }
+
+            JsonNode root = objectMapper.readTree(response.body());
+            String modelText = root.path("choices").path(0).path("message").path("content").asText("");
+            String jsonObject = extractJsonObject(modelText);
+            if (jsonObject.isBlank()) {
+                return VisionExtraction.empty();
+            }
+
+            JsonNode parsed = objectMapper.readTree(jsonObject);
+            String storeName = trim(parsed.path("storeName").asText(""), 180);
+            String currency = normalizeCurrency(parsed.path("currency").asText(""));
+            BigDecimal total = toMoney(parsed.path("total").asText(""));
+            List<ParsedItem> items = parseVisionItems(parsed.path("items"));
+            return new VisionExtraction(
+                    storeName == null ? "" : storeName,
+                    currency,
+                    safe(total).setScale(2, RoundingMode.HALF_UP),
+                    items,
+                    trim(jsonObject, 12000)
+            );
+        } catch (Exception ex) {
+            log.warn("Receipt AI extraction failed: {}", ex.getMessage());
+            return VisionExtraction.empty();
         }
     }
 
@@ -452,6 +594,142 @@ public class ShoppingReceiptService {
 
     private boolean isPdf(String fileName) {
         return fileName != null && fileName.toLowerCase(Locale.ROOT).endsWith(".pdf");
+    }
+
+    private boolean canUseReceiptAi() {
+        return !receiptAiBaseUrl.isBlank() && !receiptAiModel.isBlank();
+    }
+
+    private String trimTrailingSlash(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        String trimmed = value.trim();
+        while (trimmed.endsWith("/")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed;
+    }
+
+    private List<VisionImage> buildVisionImages(byte[] content, String originalFileName) throws Exception {
+        List<VisionImage> images = new ArrayList<>();
+        if (isPdf(originalFileName)) {
+            try (PDDocument document = Loader.loadPDF(content)) {
+                PDFRenderer renderer = new PDFRenderer(document);
+                int pageCount = Math.min(2, document.getNumberOfPages());
+                for (int page = 0; page < pageCount; page++) {
+                    BufferedImage pageImage = renderer.renderImageWithDPI(page, 220f, ImageType.RGB);
+                    BufferedImage prepared = preprocessForVision(pageImage);
+                    byte[] png = toPng(prepared);
+                    images.add(new VisionImage("image/png", Base64.getEncoder().encodeToString(png)));
+                }
+            }
+            return images;
+        }
+
+        BufferedImage source = ImageIO.read(new java.io.ByteArrayInputStream(content));
+        if (source == null) {
+            String fallbackMime = guessMimeTypeFromName(originalFileName);
+            images.add(new VisionImage(fallbackMime, Base64.getEncoder().encodeToString(content)));
+            return images;
+        }
+
+        BufferedImage prepared = preprocessForVision(source);
+        byte[] png = toPng(prepared);
+        images.add(new VisionImage("image/png", Base64.getEncoder().encodeToString(png)));
+        return images;
+    }
+
+    private BufferedImage preprocessForVision(BufferedImage source) {
+        int width = source.getWidth();
+        int height = source.getHeight();
+        int maxWidth = 1400;
+        if (width <= maxWidth) {
+            return source;
+        }
+        double scale = (double) maxWidth / width;
+        int targetWidth = maxWidth;
+        int targetHeight = Math.max(1, (int) Math.round(height * scale));
+        BufferedImage resized = new BufferedImage(targetWidth, targetHeight, BufferedImage.TYPE_INT_RGB);
+        Graphics2D graphics = resized.createGraphics();
+        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+        graphics.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        graphics.drawImage(source, 0, 0, targetWidth, targetHeight, null);
+        graphics.dispose();
+        return resized;
+    }
+
+    private String guessMimeTypeFromName(String originalFileName) {
+        if (originalFileName == null) {
+            return "image/png";
+        }
+        String lower = originalFileName.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+            return "image/jpeg";
+        }
+        if (lower.endsWith(".webp")) {
+            return "image/webp";
+        }
+        return "image/png";
+    }
+
+    private List<ParsedItem> parseVisionItems(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        Map<String, ParsedItem> unique = new LinkedHashMap<>();
+        for (JsonNode itemNode : node) {
+            String name = cleanupItemName(itemNode.path("name").asText(""));
+            BigDecimal price = toMoney(itemNode.path("price").asText(""));
+            if (name.length() < 2 || price.compareTo(BigDecimal.ZERO) <= 0) {
+                continue;
+            }
+            BigDecimal confidence = BigDecimal.valueOf(0.9).setScale(4, RoundingMode.HALF_UP);
+            String key = name.toLowerCase(Locale.ROOT) + "|" + price.toPlainString();
+            unique.putIfAbsent(key, new ParsedItem(name, price, confidence));
+        }
+        return new ArrayList<>(unique.values());
+    }
+
+    private String extractJsonObject(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        String trimmed = text.trim();
+        if (trimmed.startsWith("```")) {
+            trimmed = trimmed.replaceAll("^```(?:json)?\\s*", "").replaceAll("\\s*```$", "").trim();
+        }
+        int start = trimmed.indexOf('{');
+        int end = trimmed.lastIndexOf('}');
+        if (start < 0 || end <= start) {
+            return "";
+        }
+        return trimmed.substring(start, end + 1);
+    }
+
+    private String normalizeCurrency(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        String upper = value.trim().toUpperCase(Locale.ROOT);
+        if (upper.contains("MXN") || "MX$".equals(upper) || "MEX".equals(upper)) {
+            return "MXN";
+        }
+        if (upper.contains("USD") || "US$".equals(upper) || "$".equals(upper)) {
+            return "USD";
+        }
+        if (upper.contains("EUR") || upper.contains("€")) {
+            return "EUR";
+        }
+        return upper.length() > 3 ? upper.substring(0, 3) : upper;
+    }
+
+    private String mergeRawCorpus(String ocrText, String visionJson) {
+        String left = ocrText == null ? "" : ocrText.trim();
+        String right = visionJson == null ? "" : visionJson.trim();
+        if (left.isBlank()) return right;
+        if (right.isBlank()) return left;
+        return left + "\n\n[VISION_JSON]\n" + right;
     }
 
     private String detectCurrency(String text) {
@@ -799,5 +1077,18 @@ public class ShoppingReceiptService {
     }
 
     private record ParsedItem(String name, BigDecimal price, BigDecimal confidence) {
+    }
+
+    private record VisionImage(String mimeType, String base64) {
+    }
+
+    private record VisionExtraction(String storeName, String currency, BigDecimal total, List<ParsedItem> items, String rawText) {
+        private static VisionExtraction empty() {
+            return new VisionExtraction("", "", BigDecimal.ZERO, List.of(), "");
+        }
+
+        private boolean hasSignal() {
+            return total.compareTo(BigDecimal.ZERO) > 0 || (items != null && !items.isEmpty()) || (rawText != null && !rawText.isBlank());
+        }
     }
 }

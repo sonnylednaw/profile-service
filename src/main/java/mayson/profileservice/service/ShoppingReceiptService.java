@@ -266,6 +266,9 @@ public class ShoppingReceiptService {
                     .reduce(BigDecimal.ZERO, BigDecimal::add)
                     .setScale(2, RoundingMode.HALF_UP);
             BigDecimal total = chooseMostPlausibleTotal(parsedTotal, itemSum, parsedItems.size());
+            if (total.compareTo(BigDecimal.ZERO) <= 0 && parsedItems.isEmpty()) {
+                throw new RuntimeException("Could not extract a valid receipt. Please upload a clearer image/PDF.");
+            }
             String currency = detectCurrency(text);
             String storeName = detectStore(text);
             String inferredCategory = inferCategory(text, parsedItems, storeName);
@@ -350,6 +353,9 @@ public class ShoppingReceiptService {
         try {
             BufferedImage source = ImageIO.read(new java.io.ByteArrayInputStream(imageBytes));
             if (source != null) {
+                if (source.getWidth() < 8 || source.getHeight() < 8) {
+                    throw new RuntimeException("Image is too small for extraction. Please upload a higher-resolution image.");
+                }
                 BufferedImage prepared = preprocessForOcr(source);
                 ImageIO.write(prepared, "png", tempImage.toFile());
             } else {
@@ -357,10 +363,16 @@ public class ShoppingReceiptService {
             }
 
             String firstPass = runTesseract(tempImage, "6");
+            if (firstPass.toLowerCase(Locale.ROOT).contains("image too small to scale")) {
+                throw new RuntimeException("Image is too small for extraction. Please upload a higher-resolution image.");
+            }
             if (stripToAlnum(firstPass).length() >= 20) {
                 return firstPass;
             }
             String secondPass = runTesseract(tempImage, "11");
+            if (secondPass.toLowerCase(Locale.ROOT).contains("image too small to scale")) {
+                throw new RuntimeException("Image is too small for extraction. Please upload a higher-resolution image.");
+            }
             return secondPass.length() > firstPass.length() ? secondPass : firstPass;
         } finally {
             Files.deleteIfExists(tempImage);
@@ -460,6 +472,9 @@ public class ShoppingReceiptService {
         return text.lines()
                 .map(String::trim)
                 .filter(line -> line.length() > 2)
+                .filter(line -> !line.toLowerCase(Locale.ROOT).contains("image too small to scale"))
+                .filter(line -> !line.toLowerCase(Locale.ROOT).contains("warning"))
+                .filter(line -> !line.toLowerCase(Locale.ROOT).contains("dpi"))
                 .findFirst()
                 .orElse("Unknown Store");
     }

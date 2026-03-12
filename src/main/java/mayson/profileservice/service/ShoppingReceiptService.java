@@ -54,6 +54,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -503,6 +504,13 @@ public class ShoppingReceiptService {
         Path tempImage = Files.createTempFile("mayson-receipt-", ".png");
         try {
             BufferedImage source = ImageIO.read(new java.io.ByteArrayInputStream(imageBytes));
+            String lowerName = originalFileName == null ? "" : originalFileName.toLowerCase(Locale.ROOT);
+            if (source == null && (lowerName.endsWith(".heic") || lowerName.endsWith(".heif"))) {
+                byte[] converted = convertHeicToPng(imageBytes, lowerName);
+                if (converted != null) {
+                    source = ImageIO.read(new java.io.ByteArrayInputStream(converted));
+                }
+            }
             if (source != null) {
                 if (source.getWidth() < 8 || source.getHeight() < 8) {
                     throw new RuntimeException("Image is too small for extraction. Please upload a higher-resolution image.");
@@ -510,9 +518,8 @@ public class ShoppingReceiptService {
                 BufferedImage prepared = preprocessForOcr(source);
                 ImageIO.write(prepared, "png", tempImage.toFile());
             } else {
-                String lowerName = originalFileName == null ? "" : originalFileName.toLowerCase(Locale.ROOT);
                 if (lowerName.endsWith(".heic") || lowerName.endsWith(".heif")) {
-                    throw new RuntimeException("HEIC image could not be decoded for OCR. Please convert to JPG/PNG or use iPhone 'Most Compatible'.");
+                    throw new RuntimeException("HEIC image could not be converted for OCR. Please upload JPG/PNG or PDF.");
                 }
                 throw new RuntimeException("Unsupported image encoding for OCR. Please upload JPG, PNG, WEBP or PDF.");
             }
@@ -634,6 +641,14 @@ public class ShoppingReceiptService {
 
         BufferedImage source = ImageIO.read(new java.io.ByteArrayInputStream(content));
         if (source == null) {
+            String lowerName = originalFileName == null ? "" : originalFileName.toLowerCase(Locale.ROOT);
+            if (lowerName.endsWith(".heic") || lowerName.endsWith(".heif")) {
+                byte[] converted = convertHeicToPng(content, lowerName);
+                if (converted != null) {
+                    images.add(new VisionImage("image/png", Base64.getEncoder().encodeToString(converted)));
+                    return images;
+                }
+            }
             String fallbackMime = guessMimeTypeFromName(originalFileName);
             images.add(new VisionImage(fallbackMime, Base64.getEncoder().encodeToString(content)));
             return images;
@@ -679,6 +694,67 @@ public class ShoppingReceiptService {
             return "image/heic";
         }
         return "image/png";
+    }
+
+    private byte[] convertHeicToPng(byte[] imageBytes, String originalFileName) {
+        String lower = originalFileName == null ? "" : originalFileName.toLowerCase(Locale.ROOT);
+        String suffix = lower.endsWith(".heif") ? ".heif" : ".heic";
+        Path inputFile = null;
+        Path outputFile = null;
+        try {
+            inputFile = Files.createTempFile("mayson-heic-", suffix);
+            outputFile = Files.createTempFile("mayson-heic-converted-", ".png");
+            Files.write(inputFile, imageBytes);
+
+            List<List<String>> commands = List.of(
+                    List.of("magick", inputFile.toString(), "-auto-orient", "-strip", outputFile.toString()),
+                    List.of("convert", inputFile.toString(), "-auto-orient", "-strip", outputFile.toString()),
+                    List.of("heif-convert", inputFile.toString(), outputFile.toString())
+            );
+            for (List<String> command : commands) {
+                int exit = runExternalCommand(command, 35);
+                if (exit == 0 && Files.exists(outputFile) && Files.size(outputFile) > 0) {
+                    return Files.readAllBytes(outputFile);
+                }
+            }
+            return null;
+        } catch (Exception ex) {
+            log.warn("HEIC conversion failed: {}", ex.getMessage());
+            return null;
+        } finally {
+            try {
+                if (inputFile != null) Files.deleteIfExists(inputFile);
+            } catch (Exception ignored) { }
+            try {
+                if (outputFile != null) Files.deleteIfExists(outputFile);
+            } catch (Exception ignored) { }
+        }
+    }
+
+    private int runExternalCommand(List<String> command, int timeoutSeconds) {
+        try {
+            Process process = new ProcessBuilder(command)
+                    .redirectErrorStream(true)
+                    .start();
+            String output;
+            try (InputStream inputStream = process.getInputStream()) {
+                output = new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
+            }
+            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                log.warn("Command timed out ({}): {}s", String.join(" ", command), timeoutSeconds);
+                return -1;
+            }
+            int exit = process.exitValue();
+            if (exit != 0) {
+                log.warn("Command failed ({}): {}", String.join(" ", command), trim(output, 300));
+            }
+            return exit;
+        } catch (Exception ex) {
+            log.warn("Command not available ({}): {}", String.join(" ", command), ex.getMessage());
+            return -1;
+        }
     }
 
     private List<ParsedItem> parseVisionItems(JsonNode node) {

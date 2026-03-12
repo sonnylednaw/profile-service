@@ -177,6 +177,36 @@ public class ShoppingReceiptService {
     }
 
     @Transactional
+    public ShoppingReceiptVO deleteReceiptItem(String userId, Long receiptId, Long itemId) {
+        ShoppingReceipt receipt = receiptRepository.findByIdAndUserId(receiptId, userId)
+                .orElseThrow(() -> new RuntimeException("Receipt not found"));
+        ShoppingReceiptItem item = itemRepository.findByIdAndReceipt(itemId, receipt)
+                .orElseThrow(() -> new RuntimeException("Receipt item not found"));
+        itemRepository.delete(item);
+
+        List<ShoppingReceiptItem> remaining = itemRepository.findAllByReceiptOrderByPositionIndexAsc(receipt);
+        for (int index = 0; index < remaining.size(); index++) {
+            remaining.get(index).setPositionIndex(index);
+        }
+        itemRepository.saveAll(remaining);
+
+        BigDecimal recalculatedTotal = remaining.stream()
+                .map(ShoppingReceiptItem::getItemPrice)
+                .map(this::safe)
+                .reduce(BigDecimal.ZERO, BigDecimal::add)
+                .setScale(2, RoundingMode.HALF_UP);
+        receipt.setTotalAmount(recalculatedTotal);
+        List<ParsedItem> parsed = remaining.stream()
+                .map(line -> new ParsedItem(line.getItemName(), safe(line.getItemPrice()), safe(line.getItemConfidence())))
+                .toList();
+        if (!Boolean.TRUE.equals(receipt.getIsSupermarketPurchase())) {
+            receipt.setInferredCategory(inferCategory(receipt.getRawText(), parsed, receipt.getStoreName()));
+        }
+        receiptRepository.save(receipt);
+        return toVOWithItems(receipt);
+    }
+
+    @Transactional
     public ShoppingReceiptVO updateSupermarketClassification(String userId, Long receiptId, boolean supermarketPurchase) {
         ShoppingReceipt receipt = receiptRepository.findByIdAndUserId(receiptId, userId)
                 .orElseThrow(() -> new RuntimeException("Receipt not found"));

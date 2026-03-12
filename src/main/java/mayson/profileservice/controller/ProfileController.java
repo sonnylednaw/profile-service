@@ -134,6 +134,17 @@ public class ProfileController {
         return shoppingReceiptService.markSavedAsExpense(authentication.getName(), receiptId);
     }
 
+    @DeleteMapping("/shopping/receipts/{receiptId}/items/{itemId}")
+    @PreAuthorize("hasAuthority('SCOPE_finances.write')")
+    @Operation(summary = "Delete one extracted receipt item")
+    public ShoppingReceiptVO deleteReceiptItem(
+            Authentication authentication,
+            @PathVariable Long receiptId,
+            @PathVariable Long itemId
+    ) {
+        return shoppingReceiptService.deleteReceiptItem(authentication.getName(), receiptId, itemId);
+    }
+
     @PutMapping("/shopping/receipts/{receiptId}/classification")
     @PreAuthorize("hasAuthority('SCOPE_finances.write')")
     @Operation(summary = "Update supermarket marker/classification for a receipt")

@@ -464,7 +464,7 @@ public class ShoppingReceiptService {
         if (isPdf(originalFileName)) {
             return extractTextFromPdf(content);
         }
-        return extractTextFromImage(content);
+        return extractTextFromImage(content, originalFileName);
     }
 
     private String extractTextFromPdf(byte[] content) throws Exception {
@@ -479,7 +479,7 @@ public class ShoppingReceiptService {
                 }
                 BufferedImage image = renderer.renderImageWithDPI(page, 240f, ImageType.RGB);
                 byte[] pngBytes = toPng(image);
-                builder.append(extractTextFromImage(pngBytes)).append("\n");
+                builder.append(extractTextFromImage(pngBytes, "pdf-page.png")).append("\n");
             }
             return builder.toString();
         }
@@ -499,7 +499,7 @@ public class ShoppingReceiptService {
         }
     }
 
-    private String extractTextFromImage(byte[] imageBytes) throws Exception {
+    private String extractTextFromImage(byte[] imageBytes, String originalFileName) throws Exception {
         Path tempImage = Files.createTempFile("mayson-receipt-", ".png");
         try {
             BufferedImage source = ImageIO.read(new java.io.ByteArrayInputStream(imageBytes));
@@ -510,7 +510,11 @@ public class ShoppingReceiptService {
                 BufferedImage prepared = preprocessForOcr(source);
                 ImageIO.write(prepared, "png", tempImage.toFile());
             } else {
-                Files.write(tempImage, imageBytes);
+                String lowerName = originalFileName == null ? "" : originalFileName.toLowerCase(Locale.ROOT);
+                if (lowerName.endsWith(".heic") || lowerName.endsWith(".heif")) {
+                    throw new RuntimeException("HEIC image could not be decoded for OCR. Please convert to JPG/PNG or use iPhone 'Most Compatible'.");
+                }
+                throw new RuntimeException("Unsupported image encoding for OCR. Please upload JPG, PNG, WEBP or PDF.");
             }
 
             String firstPass = runTesseract(tempImage, "6");
@@ -670,6 +674,9 @@ public class ShoppingReceiptService {
         }
         if (lower.endsWith(".webp")) {
             return "image/webp";
+        }
+        if (lower.endsWith(".heic") || lower.endsWith(".heif")) {
+            return "image/heic";
         }
         return "image/png";
     }

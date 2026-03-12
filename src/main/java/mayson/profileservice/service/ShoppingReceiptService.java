@@ -350,10 +350,15 @@ public class ShoppingReceiptService {
                 log.warn("OCR text extraction failed for receiptId={}: {}", receiptId, ex.getMessage());
             }
 
-            VisionExtraction vision = extractWithVision(content, originalFileName);
             List<ParsedItem> ocrItems = parseItems(text);
-            List<ParsedItem> parsedItems = selectBestItems(ocrItems, vision.items());
             BigDecimal ocrTotal = parseTotal(text, ocrItems);
+            boolean strongOcrSignal = hasStrongOcrSignal(text, ocrItems, ocrTotal);
+            VisionExtraction vision = strongOcrSignal
+                    ? VisionExtraction.empty()
+                    : extractWithVisionWithRetry(content, originalFileName, 2);
+            List<ParsedItem> parsedItems = strongOcrSignal
+                    ? ocrItems
+                    : selectBestItems(ocrItems, vision.items());
             BigDecimal selectedTotal = parseTotal(text, parsedItems);
             BigDecimal parsedTotal = chooseParsedTotal(ocrTotal, selectedTotal, vision.total(), ocrItems, vision.items(), parsedItems);
             BigDecimal itemSum = parsedItems.stream()
@@ -367,8 +372,8 @@ public class ShoppingReceiptService {
                 }
                 throw new RuntimeException("Could not extract a valid receipt. Please upload a clearer image/PDF.");
             }
-            String currency = vision.currency().isBlank() ? detectCurrency(text) : vision.currency();
-            String storeName = vision.storeName().isBlank() ? detectStore(text) : vision.storeName();
+            String currency = strongOcrSignal || vision.currency().isBlank() ? detectCurrency(text) : vision.currency();
+            String storeName = strongOcrSignal || vision.storeName().isBlank() ? detectStore(text) : vision.storeName();
             String rawCorpus = mergeRawCorpus(text, vision.rawText());
             String inferredCategory = inferCategory(rawCorpus, parsedItems, storeName);
             boolean supermarketPurchase = "usual_weekly".equalsIgnoreCase(inferredCategory);
@@ -406,6 +411,32 @@ public class ShoppingReceiptService {
             receiptRepository.save(receipt);
             itemRepository.deleteAllByReceipt(receipt);
         }
+    }
+
+    private VisionExtraction extractWithVisionWithRetry(byte[] content, String originalFileName, int attempts) {
+        int maxAttempts = Math.max(1, attempts);
+        for (int i = 0; i < maxAttempts; i++) {
+            VisionExtraction extraction = extractWithVision(content, originalFileName);
+            if (extraction.hasSignal()) {
+                return extraction;
+            }
+            if (i < maxAttempts - 1) {
+                try {
+                    Thread.sleep(1200L);
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        return VisionExtraction.empty();
+    }
+
+    private boolean hasStrongOcrSignal(String text, List<ParsedItem> ocrItems, BigDecimal ocrTotal) {
+        int textSignal = stripToAlnum(text).length();
+        boolean hasItems = ocrItems != null && ocrItems.size() >= 2;
+        boolean hasTotal = safe(ocrTotal).compareTo(BigDecimal.ZERO) > 0;
+        return textSignal >= 80 || hasItems || hasTotal;
     }
 
     private VisionExtraction extractWithVision(byte[] content, String originalFileName) {

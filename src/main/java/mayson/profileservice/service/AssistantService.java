@@ -29,6 +29,7 @@ public class AssistantService {
     private static final String DEFAULT_PROVIDER = "local-fallback";
     private static final String DEFAULT_MODEL = "gpt-4o-mini";
     private static final int DEFAULT_MAX_CONTEXT_CHARS = 120000;
+    private static final int DEFAULT_MAX_CONTEXT_JSON_CHARS = 160000;
 
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
@@ -38,6 +39,7 @@ public class AssistantService {
     private final String model;
     private final int timeoutSeconds;
     private final int maxContextChars;
+    private final int maxContextJsonChars;
     private final long cacheTtlMillis;
     private final Map<String, CacheEntry> responseCache = new ConcurrentHashMap<>();
 
@@ -49,7 +51,8 @@ public class AssistantService {
             @Value("${assistant.model:" + DEFAULT_MODEL + "}") String model,
             @Value("${assistant.timeout-seconds:25}") int timeoutSeconds,
             @Value("${assistant.cache-ttl-seconds:120}") int cacheTtlSeconds,
-            @Value("${assistant.max-context-chars:" + DEFAULT_MAX_CONTEXT_CHARS + "}") int maxContextChars
+            @Value("${assistant.max-context-chars:" + DEFAULT_MAX_CONTEXT_CHARS + "}") int maxContextChars,
+            @Value("${assistant.max-context-json-chars:" + DEFAULT_MAX_CONTEXT_JSON_CHARS + "}") int maxContextJsonChars
     ) {
         this.objectMapper = objectMapper;
         this.assistantMemoryRepository = assistantMemoryRepository;
@@ -58,6 +61,7 @@ public class AssistantService {
         this.model = model == null || model.isBlank() ? DEFAULT_MODEL : model.trim();
         this.timeoutSeconds = timeoutSeconds <= 0 ? 25 : timeoutSeconds;
         this.maxContextChars = maxContextChars <= 2000 ? DEFAULT_MAX_CONTEXT_CHARS : maxContextChars;
+        this.maxContextJsonChars = maxContextJsonChars <= 3000 ? DEFAULT_MAX_CONTEXT_JSON_CHARS : maxContextJsonChars;
         this.cacheTtlMillis = Math.max(30, cacheTtlSeconds) * 1000L;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(Math.min(this.timeoutSeconds, 10)))
@@ -71,11 +75,13 @@ public class AssistantService {
         }
 
         String context = capContext(safe(request.getContext()));
+        String contextJson = capContextJson(safe(request.getContextJson()));
+        String mode = normalizeMode(safe(request.getMode()));
         String currency = safe(request.getCurrency());
         String timezone = safe(request.getTimezone());
         AssistantMemory memory = loadMemory(userId);
 
-        String cacheKey = buildCacheKey(userId, question, context, currency, timezone);
+        String cacheKey = buildCacheKey(userId, question, context, contextJson, mode, currency, timezone);
         CacheEntry cached = responseCache.get(cacheKey);
         long now = System.currentTimeMillis();
         if (cached != null && cached.expiresAt > now) {
@@ -88,7 +94,7 @@ public class AssistantService {
 
         if (canUseModel()) {
             try {
-                String answer = askModel(question, context, currency, timezone, memory);
+                String answer = askModel(question, context, contextJson, mode, currency, timezone, memory);
                 if (!answer.isBlank()) {
                     updateMemory(userId, memory, question, answer, currency);
                     AssistantAskResponseVO response = AssistantAskResponseVO.builder()
@@ -102,7 +108,7 @@ public class AssistantService {
             } catch (Exception firstError) {
                 log.warn("Assistant model call failed, retrying once. reason={}", firstError.getMessage());
                 try {
-                    String retryAnswer = askModel(question, context, currency, timezone, memory);
+                    String retryAnswer = askModel(question, context, contextJson, mode, currency, timezone, memory);
                     if (!retryAnswer.isBlank()) {
                         updateMemory(userId, memory, question, retryAnswer, currency);
                         AssistantAskResponseVO response = AssistantAskResponseVO.builder()
@@ -119,7 +125,7 @@ public class AssistantService {
             }
         }
 
-        String fallback = fallbackAnswer(question, context, currency);
+        String fallback = fallbackAnswer(question, context, mode, currency);
         updateMemory(userId, memory, question, fallback, currency);
         AssistantAskResponseVO response = AssistantAskResponseVO.builder()
                 .answer(fallback)
@@ -134,17 +140,24 @@ public class AssistantService {
         return !baseUrl.isBlank();
     }
 
-    private String askModel(String question, String context, String currency, String timezone, AssistantMemory memory) throws Exception {
-        String prompt = buildPrompt(question, context, currency, timezone, memory);
+    private String askModel(
+            String question,
+            String context,
+            String contextJson,
+            String mode,
+            String currency,
+            String timezone,
+            AssistantMemory memory
+    ) throws Exception {
+        String prompt = buildPrompt(question, context, contextJson, mode, currency, timezone, memory);
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("model", model);
-        payload.put("temperature", 0.15);
-        payload.put("max_tokens", 180);
+        payload.put("temperature", mode.equals("qa") ? 0.1 : 0.2);
+        payload.put("max_tokens", maxTokensForMode(mode));
         payload.put("messages", List.of(
                 Map.of(
                         "role", "system",
-                        "content", "You are Mayson Finance AI. Use only provided user data context and memory. " +
-                                "Answer with practical, concrete guidance and exact values when available."
+                        "content", systemInstructionForMode(mode)
                 ),
                 Map.of("role", "user", "content", prompt)
         ));
@@ -171,24 +184,49 @@ public class AssistantService {
         return content.asText().trim();
     }
 
-    private String buildPrompt(String question, String context, String currency, String timezone, AssistantMemory memory) {
+    private String buildPrompt(
+            String question,
+            String context,
+            String contextJson,
+            String mode,
+            String currency,
+            String timezone,
+            AssistantMemory memory
+    ) {
+        String structuredContext = contextJson.isBlank()
+                ? "- none"
+                : contextJson;
         return "QUESTION:\n" + question + "\n\n" +
+                "MODE: " + mode + "\n" +
                 "USER_CURRENCY: " + (currency.isBlank() ? "unknown" : currency) + "\n" +
                 "USER_TIMEZONE: " + (timezone.isBlank() ? "unknown" : timezone) + "\n" +
                 "USER_MEMORY_TOPICS: " + safe(memory.getLastTopics()) + "\n" +
                 "USER_MEMORY_PREFERENCES: " + safe(memory.getPreferenceSummary()) + "\n\n" +
+                "STRUCTURED_CONTEXT_JSON:\n" + structuredContext + "\n\n" +
                 "USER_DATA_CONTEXT:\n" + context + "\n\n" +
                 "Rules:\n" +
                 "- Always provide a short direct answer first.\n" +
                 "- Then provide 3 actionable bullets with quantified impact when possible.\n" +
-                "- If question is about saving money, include a 'Savings Plan' with daily + weekly guardrails.\n" +
+                "- Always add an `Evidence` section with 3 bullets and exact values from context.\n" +
+                "- If question is about saving money, include a `Savings Plan` with daily + weekly guardrails.\n" +
                 "- Never invent values not present in context.\n" +
-                "- If key data is missing, ask one concrete follow-up question.";
+                "- If key data is missing, ask one concrete follow-up question.\n" +
+                modeSpecificRules(mode);
     }
 
-    private String fallbackAnswer(String question, String context, String currency) {
+    private String fallbackAnswer(String question, String context, String mode, String currency) {
         String lower = question.toLowerCase();
         String currentCurrency = currency == null || currency.isBlank() ? "MXN" : currency;
+        if (mode.equals("briefing")) {
+            return "Weekly Briefing\n" +
+                    "- Focus: keep today below safe-spend cap.\n" +
+                    "- Optimize: reduce unusual_weekly first and postpone non-urgent travel spend.\n" +
+                    "- Control: review recurring costs for one removal candidate this week.\n\n" +
+                    "Evidence\n" +
+                    "- Based on your provided weekly and monthly dashboard metrics.\n" +
+                    "- Based on category trend deltas in your current context.\n" +
+                    "- Based on your last 6 weeks expense history block.";
+        }
         if (lower.contains("save") || lower.contains("sparen")) {
             double safeSpend = readContextNumber(context, "Safe spend today:");
             double weekTotal = readContextNumber(context, "Week total:");
@@ -260,8 +298,9 @@ public class AssistantService {
         return base + ";" + value;
     }
 
-    private String buildCacheKey(String userId, String question, String context, String currency, String timezone) {
-        String raw = safe(userId) + "|" + question.toLowerCase(Locale.ROOT) + "|" + currency + "|" + timezone + "|" + Integer.toHexString(context.hashCode());
+    private String buildCacheKey(String userId, String question, String context, String contextJson, String mode, String currency, String timezone) {
+        String raw = safe(userId) + "|" + question.toLowerCase(Locale.ROOT) + "|" + mode + "|" + currency + "|" + timezone + "|"
+                + Integer.toHexString(context.hashCode()) + "|" + Integer.toHexString(contextJson.hashCode());
         return Integer.toHexString(raw.hashCode());
     }
 
@@ -298,6 +337,53 @@ public class AssistantService {
         if (context == null) return "";
         if (context.length() <= maxContextChars) return context;
         return context.substring(0, maxContextChars);
+    }
+
+    private String capContextJson(String contextJson) {
+        if (contextJson == null) return "";
+        if (contextJson.length() <= maxContextJsonChars) return contextJson;
+        return contextJson.substring(0, maxContextJsonChars);
+    }
+
+    private String normalizeMode(String rawMode) {
+        String normalized = safe(rawMode).trim().toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "briefing", "qa", "expense_coach", "shopping_coach", "planner" -> normalized;
+            default -> "qa";
+        };
+    }
+
+    private int maxTokensForMode(String mode) {
+        return switch (mode) {
+            case "briefing" -> 420;
+            case "expense_coach", "shopping_coach" -> 340;
+            case "planner" -> 460;
+            default -> 300;
+        };
+    }
+
+    private String systemInstructionForMode(String mode) {
+        String base = "You are Mayson Finance AI. Use only provided user data context and memory. " +
+                "Answer with practical, concrete guidance and exact values when available.";
+        return switch (mode) {
+            case "briefing" -> base + " You produce high-signal executive briefings with priorities, risks, and direct actions.";
+            case "expense_coach" -> base + " You optimize daily spending behavior and suggest high-impact next defaults.";
+            case "shopping_coach" -> base + " You optimize basket quality, product mix, and repeat shopping efficiency.";
+            case "planner" -> base + " You create realistic finance plans with explicit guardrails and checkpoints.";
+            default -> base + " Keep answers concise, evidence-based, and structured.";
+        };
+    }
+
+    private String modeSpecificRules(String mode) {
+        return switch (mode) {
+            case "briefing" -> "- Format sections exactly: `Summary`, `Top Actions`, `Risks`, `Evidence`.\n" +
+                    "- Keep under 220 words.\n";
+            case "expense_coach" -> "- End response with line: `NEXT_DEFAULT: description|category`.\n" +
+                    "- Categories allowed: usual_weekly, unusual_weekly, travel.\n";
+            case "shopping_coach" -> "- Include one `Risk Alert` and one `Price Defense` tactic.\n";
+            case "planner" -> "- Provide a 7-day and 30-day plan with numeric caps.\n";
+            default -> "";
+        };
     }
 
     private String truncate(String value, int maxLen) {

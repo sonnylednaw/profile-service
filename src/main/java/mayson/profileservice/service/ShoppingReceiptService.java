@@ -448,6 +448,7 @@ public class ShoppingReceiptService {
             payload.put("model", receiptAiModel);
             payload.put("temperature", 0.0);
             payload.put("max_tokens", 600);
+            payload.put("response_format", Map.of("type", "json_object"));
             payload.put("messages", List.of(
                     Map.of(
                             "role", "system",

@@ -316,10 +316,11 @@ public class ShoppingReceiptService {
             }
 
             VisionExtraction vision = extractWithVision(content, originalFileName);
-            List<ParsedItem> parsedItems = vision.items().isEmpty() ? parseItems(text) : vision.items();
-            BigDecimal parsedTotal = vision.total().compareTo(BigDecimal.ZERO) > 0
-                    ? vision.total()
-                    : parseTotal(text, parsedItems);
+            List<ParsedItem> ocrItems = parseItems(text);
+            List<ParsedItem> parsedItems = selectBestItems(ocrItems, vision.items());
+            BigDecimal ocrTotal = parseTotal(text, ocrItems);
+            BigDecimal selectedTotal = parseTotal(text, parsedItems);
+            BigDecimal parsedTotal = chooseParsedTotal(ocrTotal, selectedTotal, vision.total(), ocrItems, vision.items(), parsedItems);
             BigDecimal itemSum = parsedItems.stream()
                     .map(ParsedItem::price)
                     .reduce(BigDecimal.ZERO, BigDecimal::add)
@@ -684,11 +685,98 @@ public class ShoppingReceiptService {
             if (name.length() < 2 || price.compareTo(BigDecimal.ZERO) <= 0) {
                 continue;
             }
-            BigDecimal confidence = BigDecimal.valueOf(0.9).setScale(4, RoundingMode.HALF_UP);
+            BigDecimal confidence = BigDecimal.valueOf(0.75).setScale(4, RoundingMode.HALF_UP);
             String key = name.toLowerCase(Locale.ROOT) + "|" + price.toPlainString();
             unique.putIfAbsent(key, new ParsedItem(name, price, confidence));
         }
         return new ArrayList<>(unique.values());
+    }
+
+    private List<ParsedItem> selectBestItems(List<ParsedItem> ocrItems, List<ParsedItem> visionItems) {
+        List<ParsedItem> ocr = ocrItems == null ? List.of() : ocrItems;
+        List<ParsedItem> vision = visionItems == null ? List.of() : visionItems;
+
+        if (vision.isEmpty()) return ocr;
+        if (ocr.isEmpty()) return vision;
+
+        double ocrQuality = scoreItemListQuality(ocr);
+        double visionQuality = scoreItemListQuality(vision);
+        if (ocrQuality >= visionQuality + 0.08) {
+            return ocr;
+        }
+        if (visionQuality >= ocrQuality + 0.12 && vision.size() >= 3) {
+            return vision;
+        }
+        return mergeItemsPreferOcr(ocr, vision);
+    }
+
+    private double scoreItemListQuality(List<ParsedItem> items) {
+        if (items == null || items.isEmpty()) {
+            return 0.0;
+        }
+        double avgConfidence = items.stream()
+                .map(ParsedItem::confidence)
+                .mapToDouble(conf -> safe(conf).doubleValue())
+                .average()
+                .orElse(0.0);
+        long longNames = items.stream().map(ParsedItem::name).filter(name -> name != null && name.length() >= 4).count();
+        long validPriceScale = items.stream().map(ParsedItem::price).filter(price -> safe(price).scale() >= 2).count();
+        double diversity = Math.min(1.0, items.size() / 8.0);
+        return (avgConfidence * 0.5)
+                + (((double) longNames / items.size()) * 0.2)
+                + (((double) validPriceScale / items.size()) * 0.2)
+                + (diversity * 0.1);
+    }
+
+    private List<ParsedItem> mergeItemsPreferOcr(List<ParsedItem> ocrItems, List<ParsedItem> visionItems) {
+        Map<String, ParsedItem> merged = new LinkedHashMap<>();
+        for (ParsedItem item : ocrItems) {
+            String key = normalizeMergeKey(item.name(), item.price());
+            merged.put(key, item);
+        }
+        for (ParsedItem item : visionItems) {
+            String key = normalizeMergeKey(item.name(), item.price());
+            ParsedItem existing = merged.get(key);
+            if (existing == null) {
+                merged.put(key, item);
+            }
+        }
+        return new ArrayList<>(merged.values());
+    }
+
+    private String normalizeMergeKey(String name, BigDecimal price) {
+        String normalizedName = normalizeProductName(name).replaceAll("\\s+", "");
+        String normalizedPrice = safe(price).setScale(2, RoundingMode.HALF_UP).toPlainString();
+        return normalizedName + "|" + normalizedPrice;
+    }
+
+    private BigDecimal chooseParsedTotal(
+            BigDecimal ocrTotal,
+            BigDecimal selectedTotal,
+            BigDecimal visionTotal,
+            List<ParsedItem> ocrItems,
+            List<ParsedItem> visionItems,
+            List<ParsedItem> selectedItems
+    ) {
+        BigDecimal ocr = safe(ocrTotal).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal selected = safe(selectedTotal).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal vision = safe(visionTotal).setScale(2, RoundingMode.HALF_UP);
+
+        if (selected.compareTo(BigDecimal.ZERO) > 0) {
+            if (selectedItems == null || selectedItems.isEmpty()) {
+                return selected;
+            }
+            if (selectedItems.size() >= 3) {
+                return selected;
+            }
+        }
+        if (!visionItems.isEmpty() && vision.compareTo(BigDecimal.ZERO) > 0) {
+            return vision;
+        }
+        if (!ocrItems.isEmpty() && ocr.compareTo(BigDecimal.ZERO) > 0) {
+            return ocr;
+        }
+        return selected.compareTo(BigDecimal.ZERO) > 0 ? selected : BigDecimal.ZERO;
     }
 
     private String extractJsonObject(String text) {

@@ -74,6 +74,10 @@ public class ShoppingReceiptService {
     private static final Pattern QTY_PREFIX_PATTERN = Pattern.compile("^\\s*\\d+[xX]\\s+.*");
     private static final Pattern BULK_PREFIX_PATTERN = Pattern.compile("^\\s*(?:kg|g|gr|ml|l|lt|pcs|pc)\\b.*", Pattern.CASE_INSENSITIVE);
     private static final Pattern RECEIPT_CODE_LINE_PATTERN = Pattern.compile("^\\s*[A-Z0-9\\-_/]{8,}\\s*$");
+    private static final Pattern RECEIPT_NOISE_PATTERN = Pattern.compile(".*\\b(autoriz|aprobada|afiliacion|tarjeta|cajero|suc\\.?|terminal|operator|operador|cambios|encuesta|folio|debito|credito|banc|mastercard|visa)\\b.*", Pattern.CASE_INSENSITIVE);
+    private static final Pattern RECEIPT_DISCOUNT_PATTERN = Pattern.compile(".*\\b(slps|ahorro|descuento|discount|promo)\\b.*", Pattern.CASE_INSENSITIVE);
+    private static final Pattern QTY_ITEM_TWO_PRICES_PATTERN = Pattern.compile("^\\s*\\d+[\\.,]?\\d*\\s+(.+?)\\s+([0-9]+[\\.,][0-9]{2})\\s+([0-9]+[\\.,][0-9]{2})(?:\\s+[A-Z])?\\s*$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern ITEM_ONE_PRICE_PATTERN = Pattern.compile("^\\s*(.+?)\\s+\\$?\\s*([0-9]+[\\.,][0-9]{2})\\s*-?\\s*$", Pattern.CASE_INSENSITIVE);
 
     private final ShoppingReceiptRepository receiptRepository;
     private final ShoppingReceiptItemRepository itemRepository;
@@ -945,10 +949,19 @@ public class ShoppingReceiptService {
             if (trimmed.isEmpty()) {
                 continue;
             }
-            if (trimmed.length() < 4 || SUMMARY_PATTERN.matcher(trimmed).matches()) {
+            if (trimmed.length() < 4 || SUMMARY_PATTERN.matcher(trimmed).matches() || isLikelyNonItemLine(trimmed)) {
                 continue;
             }
             if (RECEIPT_CODE_LINE_PATTERN.matcher(trimmed).matches()) {
+                continue;
+            }
+            if (RECEIPT_DISCOUNT_PATTERN.matcher(trimmed).matches() && trimmed.matches(".*[0-9][\\.,][0-9]{2}\\s*-\\s*$")) {
+                continue;
+            }
+
+            ParsedItem strictParsed = parseStrictItemLine(trimmed);
+            if (strictParsed != null) {
+                upsertParsedItem(unique, strictParsed);
                 continue;
             }
 
@@ -978,15 +991,63 @@ public class ShoppingReceiptService {
                 continue;
             }
 
-            String currentKey = name.toLowerCase(Locale.ROOT) + "|" + price.toPlainString();
-            ParsedItem existing = unique.get(currentKey);
-            if (existing == null || confidence.compareTo(existing.confidence()) > 0) {
-                unique.put(currentKey, new ParsedItem(name, price, confidence));
-            }
+            upsertParsedItem(unique, new ParsedItem(name, price, confidence));
         }
 
         items.addAll(unique.values());
         return items;
+    }
+
+    private boolean isLikelyNonItemLine(String trimmed) {
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        if (RECEIPT_NOISE_PATTERN.matcher(trimmed).matches()) {
+            return true;
+        }
+        if (lower.matches(".*\\b(calle|col\\.|cp\\b|regimen|rfc|telefono|tel\\.|mexico|quintana roo|playa del carmen)\\b.*")) {
+            return true;
+        }
+        return lower.matches("^\\d{1,2}[/\\-]\\d{1,2}[/\\-]\\d{2,4}.*$")
+                || lower.matches("^\\d{1,2}:\\d{2}.*$")
+                || lower.matches("^\\*{2,}.*")
+                || lower.matches("^.{0,3}$");
+    }
+
+    private ParsedItem parseStrictItemLine(String line) {
+        Matcher qtyTwoPrices = QTY_ITEM_TWO_PRICES_PATTERN.matcher(line);
+        if (qtyTwoPrices.matches()) {
+            String name = cleanupItemName(stripPriceFragments(qtyTwoPrices.group(1)));
+            BigDecimal totalPrice = toMoney(qtyTwoPrices.group(3));
+            if (name.length() >= 2 && totalPrice.compareTo(BigDecimal.ZERO) > 0) {
+                return new ParsedItem(name, totalPrice, BigDecimal.valueOf(0.88).setScale(4, RoundingMode.HALF_UP));
+            }
+        }
+
+        Matcher onePrice = ITEM_ONE_PRICE_PATTERN.matcher(line);
+        if (onePrice.matches()) {
+            String name = cleanupItemName(stripPriceFragments(onePrice.group(1)));
+            BigDecimal price = toMoney(onePrice.group(2));
+            if (name.length() >= 2 && price.compareTo(BigDecimal.ZERO) > 0 && !RECEIPT_DISCOUNT_PATTERN.matcher(line).matches()) {
+                return new ParsedItem(name, price, BigDecimal.valueOf(0.82).setScale(4, RoundingMode.HALF_UP));
+            }
+        }
+        return null;
+    }
+
+    private String stripPriceFragments(String raw) {
+        if (raw == null) return "";
+        return raw
+                .replaceAll("\\b[0-9]+[\\.,][0-9]{2}\\b", " ")
+                .replaceAll("\\s+[A-Z]$", " ")
+                .replaceAll("\\s{2,}", " ")
+                .trim();
+    }
+
+    private void upsertParsedItem(Map<String, ParsedItem> unique, ParsedItem candidate) {
+        String currentKey = candidate.name().toLowerCase(Locale.ROOT) + "|" + candidate.price().toPlainString();
+        ParsedItem existing = unique.get(currentKey);
+        if (existing == null || safe(candidate.confidence()).compareTo(safe(existing.confidence())) > 0) {
+            unique.put(currentKey, candidate);
+        }
     }
 
     private BigDecimal scoreItemConfidence(String originalLine, String itemName, BigDecimal price) {

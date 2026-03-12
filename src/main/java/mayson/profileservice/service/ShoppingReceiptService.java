@@ -432,9 +432,9 @@ public class ShoppingReceiptService {
                             }
                             Rules:
                             - Include every recognized line item with a positive price.
-                            - Keep names clean and short.
-                            - If uncertain, still return best-effort values.
-                            - Never include markdown or explanation, return JSON object only.
+                            - Keep names short.
+                            - If uncertain, return best-effort values.
+                            - No markdown, no explanation, JSON object only.
                             """
             ));
             for (VisionImage image : images) {
@@ -447,7 +447,7 @@ public class ShoppingReceiptService {
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("model", receiptAiModel);
             payload.put("temperature", 0.0);
-            payload.put("max_tokens", 1200);
+            payload.put("max_tokens", 600);
             payload.put("messages", List.of(
                     Map.of(
                             "role", "system",
@@ -697,7 +697,7 @@ public class ShoppingReceiptService {
     private BufferedImage preprocessForVision(BufferedImage source) {
         int width = source.getWidth();
         int height = source.getHeight();
-        int maxWidth = 1400;
+        int maxWidth = 1100;
         if (width <= maxWidth) {
             return source;
         }
